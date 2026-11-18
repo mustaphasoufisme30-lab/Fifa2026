@@ -1,0 +1,6 @@
+{
+  "name": "CLUB XI — 3D Football",
+  "description": "Original 11v11 3D football game with Three.js WebGL engine, ball physics, tactical formations, and mobile touch controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -67,7 +67,7 @@ export class CameraController {
     isGoalCelebration: boolean,
     dt: number,
   ): void {
-    if (shellState === 'title') {
+    if (shellState === 'title' || shellState === 'tournament') {
       this.flyoverAngle += dt * 0.14;
       const radiusX = 48;
       const radiusZ = 38;

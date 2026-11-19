@@ -250,7 +250,7 @@ export function MatchHud({
           data-testid="replay-indicator"
           className="fixed top-16 sm:top-20 right-3 sm:right-5 flex items-center gap-2 px-3 py-1.5 rounded-md bg-[#09121e]/92 border border-rose-500/70 shadow-xl pointer-events-auto"
         >
-          <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
+          <span className="w-1.5 h-3.5 rounded-xs bg-rose-500 shrink-0" />
           <span className="font-display font-bold text-xs sm:text-sm tracking-widest text-white uppercase">
             REPLAY
           </span>

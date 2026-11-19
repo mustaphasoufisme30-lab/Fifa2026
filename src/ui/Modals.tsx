@@ -14,23 +14,35 @@ import { TitlePanel } from './TitleScreen';
 
 const MENTALITIES: TacticalMentality[] = ['defensive', 'balanced', 'attacking'];
 
+export interface TournamentMatchSummary {
+  roundLabel: string;
+  advanced: boolean;
+  isChampion: boolean;
+  homePenalties: number | null;
+  awayPenalties: number | null;
+}
+
 interface PauseModalProps {
   homeFormation: FormationId;
   homeMentality: TacticalMentality;
+  isTournament?: boolean;
   onSelectFormation: (id: FormationId) => void;
   onSelectMentality: (m: TacticalMentality) => void;
   onResume: () => void;
   onRestart: () => void;
+  onReturnToBracket?: () => void;
   onMainMenu: () => void;
 }
 
 export function PauseModal({
   homeFormation,
   homeMentality,
+  isTournament = false,
   onSelectFormation,
   onSelectMentality,
   onResume,
   onRestart,
+  onReturnToBracket,
   onMainMenu,
 }: PauseModalProps) {
   return (
@@ -106,6 +118,15 @@ export function PauseModal({
           >
             Restart Match
           </button>
+          {isTournament && onReturnToBracket && (
+            <button
+              type="button"
+              onClick={onReturnToBracket}
+              className="w-full h-11 rounded-md bg-[#162740] hover:bg-[#1f3557] border border-amber-400/35 text-amber-300 font-display font-bold text-base tracking-wider uppercase cursor-pointer"
+            >
+              Back to Bracket
+            </button>
+          )}
           <button
             type="button"
             onClick={onMainMenu}
@@ -123,7 +144,9 @@ interface FullTimeModalProps {
   homeTeam: TeamConfig;
   awayTeam: TeamConfig;
   stats: MatchStats;
+  tournamentSummary?: TournamentMatchSummary | null;
   onPlayAgain: () => void;
+  onViewBracket?: () => void;
   onMainMenu: () => void;
 }
 
@@ -131,7 +154,9 @@ export function FullTimeModal({
   homeTeam,
   awayTeam,
   stats,
+  tournamentSummary = null,
   onPlayAgain,
+  onViewBracket,
   onMainMenu,
 }: FullTimeModalProps) {
   const totalPoss = stats.homePossessionSeconds + stats.awayPossessionSeconds;
@@ -139,12 +164,22 @@ export function FullTimeModal({
     totalPoss > 0 ? Math.round((stats.homePossessionSeconds / totalPoss) * 100) : 50;
   const awayPossPct = 100 - homePossPct;
 
-  const outcomeLabel =
-    stats.homeScore > stats.awayScore
+  const outcomeLabel = tournamentSummary
+    ? tournamentSummary.isChampion
+      ? 'TOURNAMENT CHAMPIONS!'
+      : tournamentSummary.advanced
+        ? 'ADVANCED TO NEXT ROUND'
+        : 'ELIMINATED FROM CUP'
+    : stats.homeScore > stats.awayScore
       ? `${homeTeam.name} Victory`
       : stats.awayScore > stats.homeScore
         ? `${awayTeam.name} Victory`
         : 'Full Time Draw';
+
+  const hasPens =
+    tournamentSummary !== null &&
+    tournamentSummary.homePenalties !== null &&
+    tournamentSummary.awayPenalties !== null;
 
   return (
     <div className="fixed inset-0 z-30 flex items-center justify-center bg-[#040912]/80 p-4">
@@ -154,8 +189,20 @@ export function FullTimeModal({
         className="w-full max-w-md rounded-lg bg-[#0d192a] border border-white/15 p-6 shadow-2xl"
       >
         <div className="text-center">
-          <div className="text-xs font-semibold uppercase tracking-widest text-emerald-400">
-            FULL TIME
+          <div
+            className={`text-xs font-semibold uppercase tracking-widest ${
+              tournamentSummary
+                ? tournamentSummary.isChampion
+                  ? 'text-amber-400'
+                  : tournamentSummary.advanced
+                    ? 'text-emerald-400'
+                    : 'text-rose-400'
+                : 'text-emerald-400'
+            }`}
+          >
+            {tournamentSummary
+              ? `FULL TIME · ${tournamentSummary.roundLabel.toUpperCase()}`
+              : 'FULL TIME'}
           </div>
           <h2 className="font-display font-extrabold text-3xl text-white mt-1">
             {outcomeLabel}
@@ -163,22 +210,29 @@ export function FullTimeModal({
         </div>
 
         {/* Final Scoreboard */}
-        <div className="mt-5 flex items-center justify-between px-5 py-4 rounded-md bg-[#08101c] border border-white/10">
-          <div className="text-left">
-            <div className="font-display font-bold text-xl text-white">
-              {homeTeam.shortName}
+        <div className="mt-5 px-5 py-4 rounded-md bg-[#08101c] border border-white/10">
+          <div className="flex items-center justify-between">
+            <div className="text-left">
+              <div className="font-display font-bold text-xl text-white">
+                {homeTeam.shortName}
+              </div>
+              <div className="text-xs text-slate-400">{homeTeam.name}</div>
             </div>
-            <div className="text-xs text-slate-400">{homeTeam.name}</div>
-          </div>
-          <div className="font-display font-extrabold text-4xl text-white tabular-nums">
-            {stats.homeScore} - {stats.awayScore}
-          </div>
-          <div className="text-right">
-            <div className="font-display font-bold text-xl text-white">
-              {awayTeam.shortName}
+            <div className="font-display font-extrabold text-4xl text-white tabular-nums">
+              {stats.homeScore} - {stats.awayScore}
             </div>
-            <div className="text-xs text-slate-400">{awayTeam.name}</div>
+            <div className="text-right">
+              <div className="font-display font-bold text-xl text-white">
+                {awayTeam.shortName}
+              </div>
+              <div className="text-xs text-slate-400">{awayTeam.name}</div>
+            </div>
           </div>
+          {hasPens && tournamentSummary && (
+            <div className="mt-2 pt-2 border-t border-white/10 text-center text-xs font-bold uppercase tracking-wider text-amber-300 tabular-nums">
+              Penalties: {tournamentSummary.homePenalties} - {tournamentSummary.awayPenalties}
+            </div>
+          )}
         </div>
 
         {/* Match Stats Table */}
@@ -216,14 +270,25 @@ export function FullTimeModal({
         </div>
 
         <div className="mt-6 flex gap-3">
-          <button
-            type="button"
-            data-start="true"
-            onClick={onPlayAgain}
-            className="flex-1 h-11 rounded-md bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-display font-bold text-lg tracking-wider uppercase cursor-pointer"
-          >
-            Play Again
-          </button>
+          {tournamentSummary && onViewBracket ? (
+            <button
+              type="button"
+              data-testid="fulltime-view-bracket"
+              onClick={onViewBracket}
+              className="flex-1 h-11 rounded-md bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-display font-bold text-lg tracking-wider uppercase cursor-pointer"
+            >
+              View Bracket
+            </button>
+          ) : (
+            <button
+              type="button"
+              data-start="true"
+              onClick={onPlayAgain}
+              className="flex-1 h-11 rounded-md bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-display font-bold text-lg tracking-wider uppercase cursor-pointer"
+            >
+              Play Again
+            </button>
+          )}
           <button
             type="button"
             onClick={onMainMenu}

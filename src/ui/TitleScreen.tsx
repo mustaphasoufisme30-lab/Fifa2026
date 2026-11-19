@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Play, Settings, Shield, UserRound, Users } from 'lucide-react';
+import { Play, Settings, Shield, Trophy, UserRound, Users } from 'lucide-react';
 import { CareerProgress, FormationId, TeamConfig } from '../core/types';
 
 export type TitlePanel = 'teams' | 'formation' | 'player' | 'settings' | null;
@@ -10,7 +10,9 @@ interface TitleScreenProps {
   homeFormation: FormationId;
   career: CareerProgress;
   customPlayerLabel?: string | null;
+  tournamentBadge?: string | null;
   onStartMatch: () => void;
+  onOpenTournament: () => void;
   onOpenPanel: (panel: TitlePanel) => void;
 }
 
@@ -20,7 +22,9 @@ export function TitleScreen({
   homeFormation,
   career,
   customPlayerLabel,
+  tournamentBadge,
   onStartMatch,
+  onOpenTournament,
   onOpenPanel,
 }: TitleScreenProps) {
   // Allow Enter or Space from title screen when no modal is open
@@ -64,6 +68,14 @@ export function TitleScreen({
               <span className="text-emerald-400 font-semibold">{customPlayerLabel}</span>
             </>
           )}
+          {career.trophiesWon > 0 && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="text-amber-300 font-semibold">
+                Cups {career.trophiesWon}
+              </span>
+            </>
+          )}
           {career.matchesPlayed > 0 && (
             <>
               <span aria-hidden="true">·</span>
@@ -99,15 +111,18 @@ export function TitleScreen({
           </svg>
           <div>
             <h1 className="font-display font-extrabold text-5xl sm:text-6xl tracking-tight text-white leading-none">
-              CLUB XI
+              FiFA 2026
             </h1>
             <p className="text-sm text-slate-300 mt-1">
               11v11 3D Stadium Football
             </p>
+            <p className="text-xs text-slate-300/90 mt-1">
+              Créé par <span className="text-white font-semibold">Mustapha Mahfoud</span>
+            </p>
           </div>
         </div>
 
-        {/* Primary Kick Off Button + Secondary Menu Actions */}
+        {/* Primary Kick Off + Tournament Cup + Secondary Menu Actions */}
         <div className="w-full flex flex-col gap-2.5">
           <button
             type="button"
@@ -117,6 +132,20 @@ export function TitleScreen({
           >
             <Play className="w-5 h-5 fill-slate-950 shrink-0" />
             <span>PLAY</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenTournament}
+            className="w-full sm:w-96 h-11 px-5 rounded-md bg-[#122238]/95 hover:bg-[#1a3150] border border-amber-400/55 text-white font-display font-bold text-base tracking-wider uppercase flex items-center justify-center gap-2 shadow-md transition-colors whitespace-nowrap cursor-pointer"
+          >
+            <Trophy className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>TOURNAMENT</span>
+            {tournamentBadge && (
+              <span className="text-xs font-sans font-semibold text-amber-300 normal-case">
+                · {tournamentBadge}
+              </span>
+            )}
           </button>
 
           <div className="grid grid-cols-2 gap-2 w-full sm:w-96">

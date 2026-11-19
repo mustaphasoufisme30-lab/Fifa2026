@@ -25,9 +25,11 @@ export function getDefaultSavedState(): SavedState {
       draws: 0,
       losses: 0,
       goalsScored: 0,
+      trophiesWon: 0,
     },
     customCaptainAppearance: null,
     customPlayer: getDefaultCustomPlayer(),
+    tournament: null,
   };
 }
 
@@ -51,6 +53,7 @@ export function loadSavedState(): SavedState {
       career: { ...defaults.career, ...(parsed.career ?? {}) },
       customCaptainAppearance: parsed.customCaptainAppearance ?? null,
       customPlayer: sanitizeCustomPlayerProfile(parsed.customPlayer),
+      tournament: parsed.tournament ?? null,
     };
   } catch {
     return defaults;

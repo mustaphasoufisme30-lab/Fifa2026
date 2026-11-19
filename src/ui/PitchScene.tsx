@@ -242,10 +242,24 @@ export function PitchScene({
 
         // Sync 3D visuals with live state or slow-motion goal replay proxy
         const visual = engine.getVisualState();
+        const isGoalMoment = engine.phase === 'goal' || engine.isReplaying;
+        stadiumRef.current?.update(elapsed, isGoalMoment);
+
         ballVisualRef.current?.sync(visual.ball, engine.isReplaying ? dt * 0.55 : dt);
+        const shotCharge = engine.getShotCharge();
+        const quality = settingsRef.current.quality;
+        const allowShadowsGlobal = !isSoftwareGl && quality !== 'low';
+        const shadowDistLimitSq = quality === 'high' ? 99999 : 34 * 34;
+
         for (const p of visual.players) {
           const pv = playerVisualsRef.current.get(p.id);
-          if (pv) pv.sync(p, elapsed);
+          if (!pv) continue;
+          const dx = p.position.x - visual.ball.position.x;
+          const dz = p.position.z - visual.ball.position.z;
+          const allowShadow =
+            allowShadowsGlobal &&
+            (p.isControlled || dx * dx + dz * dz <= shadowDistLimitSq);
+          pv.sync(p, elapsed, p.isControlled ? shotCharge : 0, allowShadow);
         }
 
         const controlled = visual.players.find((p) => p.isControlled) ?? null;
@@ -255,7 +269,7 @@ export function PitchScene({
           cameraModeRef.current,
           visual.ball.position,
           controlled ? controlled.position : null,
-          engine.phase === 'goal' || engine.isReplaying,
+          isGoalMoment,
           dt,
         );
       }
@@ -298,8 +312,10 @@ export function PitchScene({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Update renderer quality / shadows without recreating scene
+  // Update renderer quality, shadows, and mobile crowd LOD without recreating scene
   useEffect(() => {
+    stadiumRef.current?.setQuality(settings.quality);
+
     const renderer = rendererRef.current;
     const keyLight = keyLightRef.current;
     if (!renderer || isSoftwareGlRef.current) return;

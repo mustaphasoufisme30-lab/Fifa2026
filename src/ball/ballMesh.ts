@@ -71,6 +71,16 @@ function createContactShadowTexture(): THREE.CanvasTexture {
   return new THREE.CanvasTexture(canvas);
 }
 
+interface TrailNode {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  age: number;
+  maxAge: number;
+  active: boolean;
+}
+
+const TRAIL_POOL_SIZE = 10;
+
 export class BallVisual {
   public readonly group: THREE.Group;
   public readonly sphere: THREE.Mesh;
@@ -78,6 +88,10 @@ export class BallVisual {
 
   private readonly albedoTex: THREE.CanvasTexture;
   private readonly shadowTex: THREE.CanvasTexture;
+  private readonly trailGeo: THREE.SphereGeometry;
+  private readonly trailNodes: TrailNode[] = [];
+  private trailCursor = 0;
+  private trailSpawnAccum = 0;
 
   constructor(maxAnisotropy: number) {
     this.group = new THREE.Group();
@@ -109,16 +123,35 @@ export class BallVisual {
     this.shadowDisc.rotation.x = -Math.PI / 2;
     this.shadowDisc.position.y = 0.018;
     this.group.add(this.shadowDisc);
+
+    // Pre-allocated zero-GC trail pool for power shots and fast driven passes
+    this.trailGeo = new THREE.SphereGeometry(BALL_RADIUS * 0.72, 8, 6);
+    for (let i = 0; i < TRAIL_POOL_SIZE; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xe0f2fe,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(this.trailGeo, mat);
+      mesh.visible = false;
+      this.group.add(mesh);
+      this.trailNodes.push({ mesh, mat, age: 0, maxAge: 0.24, active: false });
+    }
   }
 
   public sync(ball: BallState, dt: number): void {
     this.sphere.position.set(ball.position.x, ball.position.y, ball.position.z);
 
-    // Visual rolling rotation based on ground velocity
-    const speed = Math.hypot(ball.velocity.x, ball.velocity.z);
-    if (speed > 0.05) {
+    // Visual rolling rotation based on ground velocity + aerial spin
+    const groundSpeed = Math.hypot(ball.velocity.x, ball.velocity.z);
+    const totalSpeed = Math.hypot(ball.velocity.x, ball.velocity.y, ball.velocity.z);
+    if (groundSpeed > 0.05) {
       this.sphere.rotation.z -= (ball.velocity.x * dt) / BALL_RADIUS;
       this.sphere.rotation.x += (ball.velocity.z * dt) / BALL_RADIUS;
+    }
+    if (Math.abs(ball.spin.y) > 0.1) {
+      this.sphere.rotation.y += ball.spin.y * dt * 0.65;
     }
 
     // Ground contact shadow stays directly underneath the ball on the turf
@@ -130,6 +163,37 @@ export class BallVisual {
       0.18,
       0.78 - heightAboveTurf * 0.16,
     );
+
+    // Spawn sleek trail nodes only during fast kicks/shots (> 15.5 m/s)
+    this.trailSpawnAccum += dt;
+    if (ball.ownerId === null && totalSpeed > 15.5 && this.trailSpawnAccum >= 0.026) {
+      this.trailSpawnAccum = 0;
+      const node = this.trailNodes[this.trailCursor];
+      this.trailCursor = (this.trailCursor + 1) % TRAIL_POOL_SIZE;
+      node.active = true;
+      node.age = 0;
+      node.maxAge = totalSpeed > 23 ? 0.28 : 0.2;
+      node.mesh.visible = true;
+      node.mesh.position.set(ball.position.x, ball.position.y, ball.position.z);
+      node.mesh.scale.setScalar(totalSpeed > 23 ? 0.95 : 0.72);
+      node.mat.color.setHex(totalSpeed > 23 ? 0xfbbf24 : 0xbae6fd);
+      node.mat.opacity = totalSpeed > 23 ? 0.42 : 0.26;
+    }
+
+    for (let i = 0; i < TRAIL_POOL_SIZE; i++) {
+      const node = this.trailNodes[i];
+      if (!node.active) continue;
+      node.age += dt;
+      if (node.age >= node.maxAge) {
+        node.active = false;
+        node.mesh.visible = false;
+        node.mat.opacity = 0;
+        continue;
+      }
+      const life = 1 - node.age / node.maxAge;
+      node.mesh.scale.setScalar(Math.max(0.15, life * 0.85));
+      node.mat.opacity = life * 0.34;
+    }
   }
 
   public dispose(): void {
@@ -137,6 +201,10 @@ export class BallVisual {
     (this.sphere.material as THREE.Material).dispose();
     this.shadowDisc.geometry.dispose();
     (this.shadowDisc.material as THREE.Material).dispose();
+    this.trailGeo.dispose();
+    for (const node of this.trailNodes) {
+      node.mat.dispose();
+    }
     this.albedoTex.dispose();
     this.shadowTex.dispose();
   }

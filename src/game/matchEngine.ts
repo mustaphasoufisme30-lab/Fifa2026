@@ -4,6 +4,7 @@ import {
   computeSetPieceAiDecision,
   executeAiBallAction,
 } from '../ai/basicAi';
+import { computeCrowdIntensity } from '../audio/crowdLogic';
 import { soundEngine } from '../audio/soundEngine';
 import {
   BALL_RADIUS,
@@ -96,6 +97,10 @@ export class MatchEngine {
   private replayRecorder = new ReplayRecorder();
   private replayBallProxy: BallState;
   private replayPlayerProxies: PlayerState[] = [];
+
+  public getShotCharge(): number {
+    return this.shotCharge;
+  }
 
   constructor(
     homeTeam: TeamConfig,
@@ -485,6 +490,7 @@ export class MatchEngine {
       const ballResult = stepBallPhysics(this.ball, dt);
       if (ballResult.hitPost) {
         soundEngine.playPostHit();
+        soundEngine.playCrowdReaction('ooh');
         this.callbacks.onCameraTrauma(0.45);
       }
 
@@ -508,6 +514,16 @@ export class MatchEngine {
     const hudInterval = this.shotCharge > 0 ? 0.04 : 0.1;
     if (this.hudEmitAccumulator >= hudInterval) {
       this.hudEmitAccumulator = 0;
+      soundEngine.updateCrowdIntensity(
+        computeCrowdIntensity({
+          shellState: this.shellState,
+          phase: this.phase,
+          ballX: this.ball.position.x,
+          ballSpeed: Math.hypot(this.ball.velocity.x, this.ball.velocity.z),
+          isReplaying: this.isReplaying,
+          isOnline: true,
+        }),
+      );
       this.emitHudSnapshot();
     }
   }
@@ -692,6 +708,7 @@ export class MatchEngine {
       p.actionState = 'tackle';
       p.actionTimer = 0.34;
       p.tackleCooldown = 0.85;
+      soundEngine.playTackle();
       this.attemptTackleSteal(p);
       if (this.phase === 'setpiece') return;
     }
@@ -942,6 +959,11 @@ export class MatchEngine {
       timer: type === 'penalty' ? 1.45 : 1.15,
     };
     soundEngine.playWhistle(type === 'penalty' || type === 'free_kick' ? 'double' : 'short');
+    if (type === 'penalty' || type === 'free_kick') {
+      soundEngine.playCrowdReaction('boo');
+    } else if (type === 'corner') {
+      soundEngine.playCrowdReaction('applause');
+    }
     this.emitHudSnapshot();
   }
 
@@ -958,6 +980,7 @@ export class MatchEngine {
         else this.stats.awaySaves += 1;
         this.callbacks.onCameraTrauma(0.25);
         soundEngine.playKick(1.1);
+        soundEngine.playCrowdReaction('ooh');
         this.emitHudSnapshot();
         return;
       }
@@ -965,6 +988,7 @@ export class MatchEngine {
         if (wasOpponentShot && incomingSpeed > 9.5) {
           if (p.team === 'home') this.stats.homeSaves += 1;
           else this.stats.awaySaves += 1;
+          soundEngine.playCrowdReaction('applause');
         }
         p.gkHoldTimer = 0.55;
         this.claimBall(p);
@@ -1036,6 +1060,22 @@ export class MatchEngine {
       minute: Math.max(1, this.matchMinutes),
     };
 
+    // Trigger goal celebration animation on the scorer & nearby teammates
+    for (const p of this.players) {
+      if (p.team === scoringTeam && p.role !== 'GK') {
+        const distToBall = Math.hypot(
+          p.position.x - this.ball.position.x,
+          p.position.z - this.ball.position.z,
+        );
+        if (p.name === scorerName || distToBall < 22) {
+          p.actionState = 'celebrate';
+          p.actionTimer = GOAL_IMPACT_DURATION + 0.5;
+          p.velocity.x = 0;
+          p.velocity.z = 0;
+        }
+      }
+    }
+
     this.replayRecorder.freezeClip();
     this.phase = 'goal';
     this.isReplaying = false;
@@ -1046,6 +1086,7 @@ export class MatchEngine {
     this.shotCharge = 0;
     this.setPiece = null;
     this.callbacks.onCameraTrauma(0.55);
+    soundEngine.playNetSwish();
     soundEngine.playWhistle('short');
     soundEngine.playGoalCheer();
     this.emitHudSnapshot();

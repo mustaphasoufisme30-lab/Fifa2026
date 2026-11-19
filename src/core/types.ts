@@ -20,7 +20,7 @@ export type QualityLevel = 'low' | 'medium' | 'high';
 
 export type CameraMode = 'tv' | 'close' | 'player' | 'replay';
 
-export type GameShellState = 'title' | 'playing' | 'paused' | 'gameover';
+export type GameShellState = 'title' | 'tournament' | 'playing' | 'paused' | 'gameover';
 
 export type MatchPhase =
   | 'kickoff'
@@ -44,7 +44,8 @@ export type PlayerActionState =
   | 'dribble'
   | 'kick'
   | 'tackle'
-  | 'dive';
+  | 'dive'
+  | 'celebrate';
 
 export interface Vec3 {
   x: number;
@@ -223,6 +224,37 @@ export interface CareerProgress {
   draws: number;
   losses: number;
   goalsScored: number;
+  trophiesWon: number;
+}
+
+export type TournamentRound = 'quarterfinal' | 'semifinal' | 'final';
+
+export type TournamentStatus = 'active' | 'champion' | 'eliminated';
+
+export interface TournamentMatch {
+  id: string;
+  round: TournamentRound;
+  slotIndex: number;
+  homeTeamId: string | null;
+  awayTeamId: string | null;
+  homeScore: number | null;
+  awayScore: number | null;
+  homePenalties: number | null;
+  awayPenalties: number | null;
+  winnerTeamId: string | null;
+  status: 'pending' | 'ready' | 'completed';
+  isUserMatch: boolean;
+}
+
+export interface TournamentState {
+  id: string;
+  name: string;
+  userTeamId: string;
+  currentRound: TournamentRound;
+  status: TournamentStatus;
+  matches: TournamentMatch[];
+  championTeamId: string | null;
+  eliminatedRound: TournamentRound | null;
 }
 
 export interface SavedState {
@@ -236,6 +268,7 @@ export interface SavedState {
   career: CareerProgress;
   customCaptainAppearance: CustomPlayerAppearance | null;
   customPlayer: CustomPlayerProfile;
+  tournament: TournamentState | null;
 }
 
 export interface RadarDot {

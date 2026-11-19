@@ -186,7 +186,7 @@ function createAdBoardTexture(): THREE.CanvasTexture {
   const ctx = canvas.getContext('2d')!;
 
   const brands = [
-    { bg: '#0f172a', fg: '#38bdf8', text: 'CLUB XI CHAMPIONSHIP' },
+    { bg: '#0f172a', fg: '#38bdf8', text: 'FiFA 2026 CHAMPIONSHIP' },
     { bg: '#0369a1', fg: '#ffffff', text: 'VELOX ATHLETICS' },
     { bg: '#064e3b', fg: '#34d399', text: 'APEX TURF SYSTEMS' },
     { bg: '#7c2d12', fg: '#fbbf24', text: 'SOLANO FINANCIAL' },
@@ -211,8 +211,26 @@ function createAdBoardTexture(): THREE.CanvasTexture {
   return tex;
 }
 
+function createFloodlightHaloTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d')!;
+  const grad = ctx.createRadialGradient(64, 64, 4, 64, 64, 62);
+  grad.addColorStop(0, 'rgba(255, 250, 232, 0.85)');
+  grad.addColorStop(0.35, 'rgba(220, 238, 255, 0.28)');
+  grad.addColorStop(1, 'rgba(220, 238, 255, 0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 128, 128);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 export interface StadiumResources {
   group: THREE.Group;
+  update: (elapsed: number, isGoalCelebration: boolean) => void;
+  setQuality: (quality: QualityLevel) => void;
   dispose: () => void;
 }
 
@@ -222,6 +240,7 @@ export function buildStadium(
 ): StadiumResources {
   const group = new THREE.Group();
   const disposables: Array<{ dispose: () => void }> = [];
+  const flagCloths: THREE.Mesh[] = [];
 
   // 1. Surrounding stadium ground apron (y = -0.025)
   const apronGeo = new THREE.PlaneGeometry(170, 128);
@@ -396,15 +415,79 @@ export function buildStadium(
       const cloth = new THREE.Mesh(flagClothGeo, flagClothMat);
       cloth.position.set(sx * HALF_LENGTH + sx * 0.22, 1.28, sz * HALF_WIDTH);
       group.add(cloth);
+      flagCloths.push(cloth);
     }
   }
 
-  // 5. Perimeter Advertising Boards
+  // 4b. Two Composite Technical Dugouts along North Touchline
+  const dugoutFrameMat = new THREE.MeshStandardMaterial({
+    color: 0x1e293b,
+    roughness: 0.45,
+    metalness: 0.45,
+  });
+  const dugoutGlassMat = new THREE.MeshStandardMaterial({
+    color: 0x93c5fd,
+    roughness: 0.2,
+    metalness: 0.1,
+    transparent: true,
+    opacity: 0.35,
+  });
+  const dugoutSeatMat = new THREE.MeshStandardMaterial({
+    color: 0x0f172a,
+    roughness: 0.7,
+    metalness: 0.1,
+  });
+  const dugoutRoofGeo = new THREE.BoxGeometry(8.4, 0.16, 2.3);
+  const dugoutBackGeo = new THREE.BoxGeometry(8.4, 1.9, 0.12);
+  const dugoutSideGeo = new THREE.BoxGeometry(0.12, 1.9, 2.2);
+  const dugoutBenchGeo = new THREE.BoxGeometry(7.6, 0.46, 0.65);
+  disposables.push(
+    dugoutFrameMat,
+    dugoutGlassMat,
+    dugoutSeatMat,
+    dugoutRoofGeo,
+    dugoutBackGeo,
+    dugoutSideGeo,
+    dugoutBenchGeo,
+  );
+
+  for (const dx of [-13.5, 13.5] as const) {
+    const dugout = new THREE.Group();
+    dugout.position.set(dx, 0, -HALF_WIDTH - 2.65);
+
+    const roof = new THREE.Mesh(dugoutRoofGeo, dugoutFrameMat);
+    roof.position.set(0, 2.05, 0);
+    roof.rotation.x = 0.08;
+    dugout.add(roof);
+
+    const backWall = new THREE.Mesh(dugoutBackGeo, dugoutGlassMat);
+    backWall.position.set(0, 1.0, -1.05);
+    dugout.add(backWall);
+
+    const leftWall = new THREE.Mesh(dugoutSideGeo, dugoutGlassMat);
+    leftWall.position.set(-4.14, 1.0, 0);
+    dugout.add(leftWall);
+
+    const rightWall = new THREE.Mesh(dugoutSideGeo, dugoutGlassMat);
+    rightWall.position.set(4.14, 1.0, 0);
+    dugout.add(rightWall);
+
+    const bench = new THREE.Mesh(dugoutBenchGeo, dugoutSeatMat);
+    bench.position.set(0, 0.36, -0.42);
+    dugout.add(bench);
+
+    group.add(dugout);
+  }
+
+  // 5. Perimeter Advertising Boards (with subtle goal-celebration LED pulse)
   const adTex = createAdBoardTexture();
   adTex.anisotropy = maxAnisotropy;
   const adMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     map: adTex,
+    emissive: new THREE.Color(0x1e3a5f),
+    emissiveMap: adTex,
+    emissiveIntensity: 0.16,
     roughness: 0.45,
     metalness: 0.1,
   });
@@ -475,8 +558,10 @@ export function buildStadium(
     group.add(standGroup);
   }
 
-  // Instanced spectators on North, East, West stands (avoid blocking South TV camera line of sight)
-  const crowdCount = quality === 'low' ? 360 : quality === 'medium' ? 750 : 1140;
+  // Instanced spectators on North, East, West stands with live quality-adaptive LOD count
+  const maxCrowdCount = 1140;
+  const getCrowdCountForQuality = (q: QualityLevel) =>
+    q === 'low' ? 360 : q === 'medium' ? 750 : maxCrowdCount;
   const specGeo = new THREE.BoxGeometry(0.55, 0.92, 0.42);
   const specMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -484,12 +569,12 @@ export function buildStadium(
   });
   disposables.push(specGeo, specMat);
 
-  const crowdInstanced = new THREE.InstancedMesh(specGeo, specMat, crowdCount);
+  const crowdInstanced = new THREE.InstancedMesh(specGeo, specMat, maxCrowdCount);
   const dummy = new THREE.Object3D();
   const color = new THREE.Color();
   const palette = [0x0f62fe, 0xdc2626, 0xf8fafc, 0xf59e0b, 0x38bdf8, 0x10b981];
 
-  for (let i = 0; i < crowdCount; i++) {
+  for (let i = 0; i < maxCrowdCount; i++) {
     const section = i % 3;
     const tier = i % 3;
     if (section === 0) {
@@ -522,14 +607,25 @@ export function buildStadium(
   }
   crowdInstanced.instanceMatrix.needsUpdate = true;
   if (crowdInstanced.instanceColor) crowdInstanced.instanceColor.needsUpdate = true;
+  crowdInstanced.count = getCrowdCountForQuality(quality);
   crowdInstanced.computeBoundingSphere();
   group.add(crowdInstanced);
 
-  // 7. Four Stadium Floodlight Towers
+  // 7. Four Stadium Floodlight Towers with Soft Atmospheric Glow Halos
   const towerPoleGeo = new THREE.CylinderGeometry(0.45, 0.75, 29, 8);
   const towerHeadGeo = new THREE.BoxGeometry(5.6, 2.8, 0.8);
   const towerBulbMat = new THREE.MeshBasicMaterial({ color: 0xfff8e7 });
-  disposables.push(towerPoleGeo, towerHeadGeo, towerBulbMat);
+  const haloTex = createFloodlightHaloTexture();
+  const haloGeo = new THREE.PlaneGeometry(16, 16);
+  const haloMat = new THREE.MeshBasicMaterial({
+    map: haloTex,
+    transparent: true,
+    opacity: 0.42,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+  });
+  disposables.push(towerPoleGeo, towerHeadGeo, towerBulbMat, haloTex, haloGeo, haloMat);
 
   for (const sx of [-1, 1] as const) {
     for (const sz of [-1, 1] as const) {
@@ -544,11 +640,35 @@ export function buildStadium(
       head.position.set(tx, 29.5, tz);
       head.lookAt(0, 0, 0);
       group.add(head);
+
+      const halo = new THREE.Mesh(haloGeo, haloMat);
+      halo.position.set(tx - sx * 0.8, 29.2, tz - sz * 0.8);
+      halo.lookAt(0, 4, 0);
+      group.add(halo);
     }
   }
 
   return {
     group,
+    update: (elapsed: number, isGoalCelebration: boolean) => {
+      // Gentle stadium breeze flutter on corner flags
+      for (let i = 0; i < flagCloths.length; i++) {
+        flagCloths[i].rotation.y = Math.sin(elapsed * 5.0 + i * 1.3) * 0.28;
+      }
+
+      // Dynamic LED ad-board glow pulse during goal celebrations
+      if (isGoalCelebration) {
+        const pulse = 0.42 + Math.sin(elapsed * 12) * 0.26;
+        adMat.emissive.setHex(0xf59e0b);
+        adMat.emissiveIntensity = pulse;
+      } else {
+        adMat.emissive.setHex(0x1e3a5f);
+        adMat.emissiveIntensity = 0.16;
+      }
+    },
+    setQuality: (nextQuality: QualityLevel) => {
+      crowdInstanced.count = getCrowdCountForQuality(nextQuality);
+    },
     dispose: () => {
       for (const d of disposables) {
         d.dispose();

@@ -26,10 +26,23 @@ interface SharedPlayerGeometries {
   shadow: THREE.CircleGeometry;
   ring: THREE.RingGeometry;
   marker: THREE.ConeGeometry;
+  aimChevron: THREE.BufferGeometry;
 }
 
 let sharedGeos: SharedPlayerGeometries | null = null;
 let sharedShadowTex: THREE.CanvasTexture | null = null;
+
+function createAimChevronGeometry(): THREE.BufferGeometry {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0.42);
+  shape.lineTo(0.26, 0);
+  shape.lineTo(0, 0.14);
+  shape.lineTo(-0.26, 0);
+  shape.closePath();
+  const geo = new THREE.ShapeGeometry(shape);
+  geo.rotateX(Math.PI / 2);
+  return geo;
+}
 
 function getSharedGeometries(): SharedPlayerGeometries {
   if (sharedGeos) return sharedGeos;
@@ -51,6 +64,7 @@ function getSharedGeometries(): SharedPlayerGeometries {
     shadow: new THREE.CircleGeometry(0.48, 18),
     ring: new THREE.RingGeometry(0.56, 0.72, 24),
     marker: new THREE.ConeGeometry(0.16, 0.26, 4),
+    aimChevron: createAimChevronGeometry(),
   };
   return sharedGeos;
 }
@@ -260,6 +274,10 @@ export class PlayerVisual {
   private readonly rightLegPivot: THREE.Group;
   private readonly controlledRing: THREE.Mesh;
   private readonly controlledMarker: THREE.Mesh;
+  private readonly controlledAimPivot: THREE.Group;
+  private readonly controlledAimArrow: THREE.Mesh;
+  private readonly shadowCasters: THREE.Mesh[] = [];
+  private lastShadowCast = true;
   private readonly disposableMaterials: THREE.Material[] = [];
   private readonly disposableTextures: THREE.Texture[] = [];
 
@@ -449,7 +467,7 @@ export class PlayerVisual {
     shadowDisc.position.y = 0.015;
     this.root.add(shadowDisc);
 
-    // 7. Controlled player ground ring & overhead marker
+    // 7. Controlled player ground ring, directional aim chevron & overhead marker
     const ringMat = new THREE.MeshBasicMaterial({
       color: 0x38bdf8,
       side: THREE.DoubleSide,
@@ -460,7 +478,14 @@ export class PlayerVisual {
     const markerMat = new THREE.MeshBasicMaterial({
       color: 0x38bdf8,
     });
-    this.disposableMaterials.push(ringMat, markerMat);
+    const aimMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.85,
+      depthWrite: false,
+    });
+    this.disposableMaterials.push(ringMat, markerMat, aimMat);
 
     this.controlledRing = new THREE.Mesh(geos.ring, ringMat);
     this.controlledRing.rotation.x = -Math.PI / 2;
@@ -468,21 +493,60 @@ export class PlayerVisual {
     this.controlledRing.visible = player.isControlled;
     this.root.add(this.controlledRing);
 
+    this.controlledAimPivot = new THREE.Group();
+    this.controlledAimPivot.position.y = 0.026;
+    this.controlledAimPivot.visible = player.isControlled;
+    this.controlledAimArrow = new THREE.Mesh(geos.aimChevron, aimMat);
+    this.controlledAimArrow.position.z = 0.82;
+    this.controlledAimPivot.add(this.controlledAimArrow);
+    this.root.add(this.controlledAimPivot);
+
     this.controlledMarker = new THREE.Mesh(geos.marker, markerMat);
     this.controlledMarker.rotation.x = Math.PI;
     this.controlledMarker.position.y = 2.15;
     this.controlledMarker.visible = player.isControlled;
     this.root.add(this.controlledMarker);
+
+    // Collect shadow-casting meshes once for zero-allocation distance LOD toggling
+    this.bodyGroup.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh && obj.castShadow) {
+        this.shadowCasters.push(obj as THREE.Mesh);
+      }
+    });
   }
 
-  public sync(player: PlayerState, elapsed: number): void {
+  public sync(
+    player: PlayerState,
+    elapsed: number,
+    shotCharge = 0,
+    allowShadowCast = true,
+  ): void {
     this.root.position.set(player.position.x, player.position.y, player.position.z);
     this.bodyGroup.rotation.y = player.facingAngle;
+
+    if (allowShadowCast !== this.lastShadowCast) {
+      this.lastShadowCast = allowShadowCast;
+      for (let i = 0; i < this.shadowCasters.length; i++) {
+        this.shadowCasters[i].castShadow = allowShadowCast;
+      }
+    }
 
     const speed = Math.hypot(player.velocity.x, player.velocity.z);
     const isMoving = speed > 0.35;
 
-    if (player.actionState === 'dive') {
+    if (player.actionState === 'celebrate') {
+      // Triumphant arms-up goal celebration hop
+      const hop = Math.abs(Math.sin(elapsed * 7.5 + player.slotIndex)) * 0.22;
+      this.bodyGroup.position.y = hop;
+      this.bodyGroup.rotation.x = -0.06;
+      this.bodyGroup.rotation.z = Math.sin(elapsed * 5 + player.slotIndex) * 0.08;
+      this.leftLegPivot.rotation.x = -hop * 1.4;
+      this.rightLegPivot.rotation.x = hop * 0.8;
+      this.leftArmPivot.rotation.x = -2.75;
+      this.rightArmPivot.rotation.x = -2.75;
+      this.leftArmPivot.rotation.z = 0.42;
+      this.rightArmPivot.rotation.z = -0.42;
+    } else if (player.actionState === 'dive') {
       // Full-stretch lateral goalkeeper save pose
       const sideSign = (player.team === 'home' ? -1 : 1) * (player.diveDir || 1);
       this.bodyGroup.position.y = 0.36;
@@ -516,15 +580,16 @@ export class PlayerVisual {
       this.leftArmPivot.rotation.z = 0;
       this.rightArmPivot.rotation.z = 0;
     } else if (isMoving) {
-      const strideAmp = Math.min(0.82, 0.25 + speed * 0.075);
+      const isSprint = player.actionState === 'sprint';
+      const strideAmp = Math.min(isSprint ? 0.96 : 0.82, 0.25 + speed * 0.078);
       const swing = Math.sin(player.animPhase);
-      this.bodyGroup.position.y = Math.abs(Math.cos(player.animPhase)) * 0.045;
-      this.bodyGroup.rotation.x = Math.min(0.18, speed * 0.02);
+      this.bodyGroup.position.y = Math.abs(Math.cos(player.animPhase)) * (isSprint ? 0.06 : 0.045);
+      this.bodyGroup.rotation.x = Math.min(isSprint ? 0.24 : 0.18, speed * 0.022);
       this.bodyGroup.rotation.z = 0;
       this.leftLegPivot.rotation.x = swing * strideAmp;
       this.rightLegPivot.rotation.x = -swing * strideAmp;
-      this.leftArmPivot.rotation.x = -swing * strideAmp * 0.7;
-      this.rightArmPivot.rotation.x = swing * strideAmp * 0.7;
+      this.leftArmPivot.rotation.x = -swing * strideAmp * (isSprint ? 0.85 : 0.7);
+      this.rightArmPivot.rotation.x = swing * strideAmp * (isSprint ? 0.85 : 0.7);
       this.leftArmPivot.rotation.z = 0;
       this.rightArmPivot.rotation.z = 0;
     } else {
@@ -540,17 +605,26 @@ export class PlayerVisual {
       this.rightArmPivot.rotation.z = 0;
     }
 
-    // Controlled ring & indicator visibility
+    // Controlled ring, aim chevron & overhead indicator
     const showCtrl = player.isControlled;
     this.controlledRing.visible = showCtrl;
     this.controlledMarker.visible = showCtrl;
+    this.controlledAimPivot.visible = showCtrl;
     if (showCtrl) {
+      const indicatorHex =
+        shotCharge > 0.72
+          ? 0xf43f5e
+          : shotCharge > 0.05 || player.hasBall
+            ? 0xfacc15
+            : 0x38bdf8;
       this.controlledMarker.position.y = 2.12 + Math.sin(elapsed * 4.5) * 0.08;
-      const ringMat = this.controlledRing.material as THREE.MeshBasicMaterial;
-      ringMat.color.setHex(player.hasBall ? 0xfacc15 : 0x38bdf8);
-      (this.controlledMarker.material as THREE.MeshBasicMaterial).color.setHex(
-        player.hasBall ? 0xfacc15 : 0x38bdf8,
-      );
+      (this.controlledRing.material as THREE.MeshBasicMaterial).color.setHex(indicatorHex);
+      (this.controlledMarker.material as THREE.MeshBasicMaterial).color.setHex(indicatorHex);
+
+      this.controlledAimPivot.rotation.y = player.facingAngle;
+      this.controlledAimArrow.position.z = 0.82 + shotCharge * 0.55;
+      this.controlledAimArrow.scale.set(1 + shotCharge * 0.3, 1, 1 + shotCharge * 0.85);
+      (this.controlledAimArrow.material as THREE.MeshBasicMaterial).color.setHex(indicatorHex);
     }
   }
 

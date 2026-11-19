@@ -52,12 +52,38 @@ export interface Vec3 {
   z: number;
 }
 
+export type HairStyleId = 'short' | 'fade' | 'curly' | 'buzz' | 'mohawk' | 'long';
+
+export type FacePresetId = 'classic' | 'sculpted' | 'athletic' | 'beard';
+
+export type JerseyPatternId = 'stripe' | 'solid' | 'hoops' | 'sash';
+
 export interface CustomPlayerAppearance {
   skinTone: string;
-  hairStyle: 'short' | 'fade' | 'curly' | 'buzz';
+  facePreset?: FacePresetId;
+  hairStyle: HairStyleId;
   hairColor: string;
   bootsColor: string;
+  jerseyPattern?: JerseyPatternId;
+  jerseyColorOverride?: string | null;
   referenceImageDataUrl?: string | null;
+}
+
+export interface CustomPlayerRatings {
+  pace: number; // 60 - 96
+  shooting: number; // 60 - 96
+  passing: number; // 60 - 96
+  dribbling: number; // 60 - 96
+  stamina: number; // 65 - 99
+}
+
+export interface CustomPlayerProfile {
+  enabled: boolean;
+  slotIndex: number; // 1..10 outfield slot on Home squad (default 9 = ST)
+  name: string;
+  number: number; // 1..99
+  appearance: CustomPlayerAppearance;
+  ratings: CustomPlayerRatings;
 }
 
 export interface PlayerAttributes {
@@ -209,6 +235,7 @@ export interface SavedState {
   awayMentality: TacticalMentality;
   career: CareerProgress;
   customCaptainAppearance: CustomPlayerAppearance | null;
+  customPlayer: CustomPlayerProfile;
 }
 
 export interface RadarDot {

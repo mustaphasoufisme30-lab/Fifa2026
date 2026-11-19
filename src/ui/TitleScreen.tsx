@@ -1,14 +1,15 @@
 import { useEffect } from 'react';
-import { Play, Settings, Shield, Users } from 'lucide-react';
+import { Play, Settings, Shield, UserRound, Users } from 'lucide-react';
 import { CareerProgress, FormationId, TeamConfig } from '../core/types';
 
-export type TitlePanel = 'teams' | 'formation' | 'settings' | null;
+export type TitlePanel = 'teams' | 'formation' | 'player' | 'settings' | null;
 
 interface TitleScreenProps {
   homeTeam: TeamConfig;
   awayTeam: TeamConfig;
   homeFormation: FormationId;
   career: CareerProgress;
+  customPlayerLabel?: string | null;
   onStartMatch: () => void;
   onOpenPanel: (panel: TitlePanel) => void;
 }
@@ -18,6 +19,7 @@ export function TitleScreen({
   awayTeam,
   homeFormation,
   career,
+  customPlayerLabel,
   onStartMatch,
   onOpenPanel,
 }: TitleScreenProps) {
@@ -25,6 +27,7 @@ export function TitleScreen({
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (document.body.dataset.state !== 'title') return;
+      if (document.querySelector('[role="dialog"]')) return;
       if (e.code === 'Enter' || e.code === 'Space') {
         const tag = (e.target as HTMLElement | null)?.tagName;
         if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'SELECT') return;
@@ -55,6 +58,12 @@ export function TitleScreen({
         </div>
         <div className="hidden sm:flex items-center gap-2 text-slate-300 tabular-nums">
           <span>Formation {homeFormation}</span>
+          {customPlayerLabel && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="text-emerald-400 font-semibold">{customPlayerLabel}</span>
+            </>
+          )}
           {career.matchesPlayed > 0 && (
             <>
               <span aria-hidden="true">·</span>
@@ -110,11 +119,11 @@ export function TitleScreen({
             <span>PLAY</span>
           </button>
 
-          <div className="grid grid-cols-3 gap-2 w-full sm:w-96">
+          <div className="grid grid-cols-2 gap-2 w-full sm:w-96">
             <button
               type="button"
               onClick={() => onOpenPanel('teams')}
-              className="h-11 px-2.5 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+              className="h-11 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
             >
               <Shield className="w-4 h-4 text-sky-400 shrink-0" />
               <span>TEAMS</span>
@@ -123,7 +132,7 @@ export function TitleScreen({
             <button
               type="button"
               onClick={() => onOpenPanel('formation')}
-              className="h-11 px-2.5 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+              className="h-11 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
             >
               <Users className="w-4 h-4 text-amber-400 shrink-0" />
               <span>FORMATION</span>
@@ -131,8 +140,17 @@ export function TitleScreen({
 
             <button
               type="button"
+              onClick={() => onOpenPanel('player')}
+              className="h-11 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+            >
+              <UserRound className="w-4 h-4 text-violet-400 shrink-0" />
+              <span>PLAYER</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => onOpenPanel('settings')}
-              className="h-11 px-2.5 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+              className="h-11 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
             >
               <Settings className="w-4 h-4 text-emerald-400 shrink-0" />
               <span>SETTINGS</span>

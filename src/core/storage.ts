@@ -1,5 +1,6 @@
 import { DEFAULT_HALF_REAL_SECONDS } from './constants';
 import { SavedState } from './types';
+import { getDefaultCustomPlayer, sanitizeCustomPlayerProfile } from '../players/customPlayer';
 
 const STORAGE_KEY = 'club_xi_football_save_v1';
 
@@ -26,6 +27,7 @@ export function getDefaultSavedState(): SavedState {
       goalsScored: 0,
     },
     customCaptainAppearance: null,
+    customPlayer: getDefaultCustomPlayer(),
   };
 }
 
@@ -48,6 +50,7 @@ export function loadSavedState(): SavedState {
       awayMentality: parsed.awayMentality ?? defaults.awayMentality,
       career: { ...defaults.career, ...(parsed.career ?? {}) },
       customCaptainAppearance: parsed.customCaptainAppearance ?? null,
+      customPlayer: sanitizeCustomPlayerProfile(parsed.customPlayer),
     };
   } catch {
     return defaults;

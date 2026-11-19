@@ -4,6 +4,7 @@ import { InputManager } from './controls/inputManager';
 import { loadSavedState, saveState } from './core/storage';
 import {
   CameraMode,
+  CustomPlayerProfile,
   FormationId,
   GameSettings,
   GameShellState,
@@ -13,10 +14,12 @@ import {
   TacticalMentality,
 } from './core/types';
 import { MatchEngine } from './game/matchEngine';
+import { applyCustomPlayerToTeam } from './players/customPlayer';
 import { getTeamById } from './teams/teams';
 import { MatchHud } from './ui/MatchHud';
 import { FullTimeModal, PauseModal, TitleSettingsDrawer } from './ui/Modals';
 import { PitchScene } from './ui/PitchScene';
+import { PlayerStudioModal } from './ui/PlayerStudioModal';
 import { TitlePanel, TitleScreen } from './ui/TitleScreen';
 
 const CAMERA_CYCLE: CameraMode[] = ['tv', 'close', 'player'];
@@ -28,7 +31,11 @@ export default function App() {
   const [teamVersion, setTeamVersion] = useState(0);
   const [contextLost, setContextLost] = useState(false);
 
-  const homeTeam = useMemo(() => getTeamById(saved.homeTeamId), [saved.homeTeamId]);
+  const baseHomeTeam = useMemo(() => getTeamById(saved.homeTeamId), [saved.homeTeamId]);
+  const homeTeam = useMemo(
+    () => applyCustomPlayerToTeam(baseHomeTeam, saved.customPlayer),
+    [baseHomeTeam, saved.customPlayer],
+  );
   const awayTeam = useMemo(() => getTeamById(saved.awayTeamId), [saved.awayTeamId]);
 
   const [hudSnapshot, setHudSnapshot] = useState<MatchHudSnapshot>(() => ({
@@ -246,8 +253,28 @@ export default function App() {
     };
     persist(next);
     if (engineRef.current) {
-      engineRef.current.homeTeam = getTeamById(homeId);
+      engineRef.current.homeTeam = applyCustomPlayerToTeam(
+        getTeamById(homeId),
+        next.customPlayer,
+      );
       engineRef.current.awayTeam = getTeamById(awayId);
+      engineRef.current.rebuildTeams();
+      engineRef.current.emitHudSnapshot();
+      setTeamVersion((v) => v + 1);
+    }
+  };
+
+  const handleSaveCustomPlayer = (customPlayer: CustomPlayerProfile) => {
+    const next: SavedState = {
+      ...saved,
+      customPlayer,
+    };
+    persist(next);
+    if (engineRef.current) {
+      engineRef.current.homeTeam = applyCustomPlayerToTeam(
+        getTeamById(next.homeTeamId),
+        customPlayer,
+      );
       engineRef.current.rebuildTeams();
       engineRef.current.emitHudSnapshot();
       setTeamVersion((v) => v + 1);
@@ -354,29 +381,43 @@ export default function App() {
             awayTeam={awayTeam}
             homeFormation={saved.homeFormation}
             career={saved.career}
+            customPlayerLabel={
+              saved.customPlayer.enabled
+                ? `#${saved.customPlayer.number} ${saved.customPlayer.name}`
+                : null
+            }
             onStartMatch={startMatch}
             onOpenPanel={setActivePanel}
           />
-          <TitleSettingsDrawer
-            panel={activePanel}
-            homeTeamId={saved.homeTeamId}
-            awayTeamId={saved.awayTeamId}
-            homeFormation={saved.homeFormation}
-            awayFormation={saved.awayFormation}
-            homeMentality={saved.homeMentality}
-            settings={saved.settings}
-            onClose={() => setActivePanel(null)}
-            onSelectHomeTeam={(id) =>
-              handleUpdateTeams(id, id === saved.awayTeamId ? saved.homeTeamId : saved.awayTeamId)
-            }
-            onSelectAwayTeam={(id) =>
-              handleUpdateTeams(id === saved.homeTeamId ? saved.awayTeamId : saved.homeTeamId, id)
-            }
-            onSelectFormation={(id) => handleSelectFormation(id, true)}
-            onSelectAwayFormation={handleSelectAwayFormation}
-            onSelectMentality={handleSelectMentality}
-            onUpdateSettings={handleUpdateSettings}
-          />
+          {activePanel === 'player' ? (
+            <PlayerStudioModal
+              profile={saved.customPlayer}
+              homeTeam={baseHomeTeam}
+              onSave={handleSaveCustomPlayer}
+              onClose={() => setActivePanel(null)}
+            />
+          ) : (
+            <TitleSettingsDrawer
+              panel={activePanel}
+              homeTeamId={saved.homeTeamId}
+              awayTeamId={saved.awayTeamId}
+              homeFormation={saved.homeFormation}
+              awayFormation={saved.awayFormation}
+              homeMentality={saved.homeMentality}
+              settings={saved.settings}
+              onClose={() => setActivePanel(null)}
+              onSelectHomeTeam={(id) =>
+                handleUpdateTeams(id, id === saved.awayTeamId ? saved.homeTeamId : saved.awayTeamId)
+              }
+              onSelectAwayTeam={(id) =>
+                handleUpdateTeams(id === saved.homeTeamId ? saved.awayTeamId : saved.homeTeamId, id)
+              }
+              onSelectFormation={(id) => handleSelectFormation(id, true)}
+              onSelectAwayFormation={handleSelectAwayFormation}
+              onSelectMentality={handleSelectMentality}
+              onUpdateSettings={handleUpdateSettings}
+            />
+          )}
         </>
       )}
 

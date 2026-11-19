@@ -1,9 +1,19 @@
 import { InputSnapshot } from '../core/types';
-import { ClientToServerMessage, ServerToClientMessage } from './protocol';
+import {
+  ClientToServerMessage,
+  RoomBootstrapData,
+  ServerToClientMessage,
+} from './protocol';
 
 export type OnlineSocketStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
 
+export interface ActiveOnlineSession {
+  roomCode: string;
+  bootstrap?: RoomBootstrapData;
+}
+
 export interface OnlineClientListeners {
+  getAuthToken?: (forceRefresh?: boolean) => Promise<string | null>;
   onStatusChange?: (status: OnlineSocketStatus) => void;
   onLatencyChange?: (latencyMs: number) => void;
   onMessage?: (msg: ServerToClientMessage) => void;
@@ -17,21 +27,40 @@ export class OnlineMultiplayerClient {
   private pingTimer: number | null = null;
   private reconnectAttempts = 0;
   private shouldReconnect = false;
-  private activeSession: { roomCode: string; uid: string } | null = null;
+  private activeSession: ActiveOnlineSession | null = null;
   private lastInputSentAt = 0;
   private lastSentAxes = { moveX: 0, moveZ: 0, sprint: false, shootHeld: false };
   private outboundQueue: ClientToServerMessage[] = [];
+  private isAuthenticated = false;
+  private authInFlight = false;
+  private retriedTokenRefresh = false;
 
   constructor(listeners: OnlineClientListeners) {
     this.listeners = listeners;
   }
 
-  public setActiveSession(session: { roomCode: string; uid: string } | null): void {
+  public setActiveSession(session: ActiveOnlineSession | null): void {
     this.activeSession = session;
+  }
+
+  public updateSessionBootstrap(bootstrap: RoomBootstrapData): void {
+    if (this.activeSession) {
+      this.activeSession = {
+        ...this.activeSession,
+        bootstrap,
+      };
+    }
   }
 
   public getStatus(): OnlineSocketStatus {
     return this.status;
+  }
+
+  public reauthenticate(): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN && !this.isAuthenticated) {
+      this.retriedTokenRefresh = false;
+      void this.authenticateSocket(false);
+    }
   }
 
   public connect(): void {
@@ -40,6 +69,9 @@ export class OnlineMultiplayerClient {
       this.ws &&
       (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)
     ) {
+      if (this.ws.readyState === WebSocket.OPEN && !this.isAuthenticated) {
+        void this.authenticateSocket(false);
+      }
       return;
     }
 
@@ -55,22 +87,12 @@ export class OnlineMultiplayerClient {
 
       ws.onopen = () => {
         this.reconnectAttempts = 0;
+        this.isAuthenticated = false;
+        this.authInFlight = false;
+        this.retriedTokenRefresh = false;
         this.setStatus('connected');
         this.startPingLoop();
-
-        // Automatically rejoin active match/room after network recovery
-        if (this.activeSession) {
-          this.sendRaw({
-            type: 'room:reconnect',
-            roomCode: this.activeSession.roomCode,
-            uid: this.activeSession.uid,
-          });
-        }
-
-        while (this.outboundQueue.length > 0) {
-          const queued = this.outboundQueue.shift();
-          if (queued) this.sendRaw(queued);
-        }
+        void this.authenticateSocket(false);
       };
 
       ws.onmessage = (ev) => {
@@ -81,6 +103,28 @@ export class OnlineMultiplayerClient {
             this.listeners.onLatencyChange?.(rtt);
             return;
           }
+
+          if (msg.type === 'auth:ok') {
+            this.isAuthenticated = true;
+            this.authInFlight = false;
+            this.retriedTokenRefresh = false;
+            this.flushAfterAuth();
+            this.listeners.onMessage?.(msg);
+            return;
+          }
+
+          if (msg.type === 'auth:error') {
+            this.isAuthenticated = false;
+            this.authInFlight = false;
+            if (!this.retriedTokenRefresh && this.listeners.getAuthToken) {
+              this.retriedTokenRefresh = true;
+              void this.authenticateSocket(true);
+              return;
+            }
+            this.listeners.onMessage?.(msg);
+            return;
+          }
+
           this.listeners.onMessage?.(msg);
         } catch {
           // Ignore malformed packet
@@ -90,6 +134,8 @@ export class OnlineMultiplayerClient {
       ws.onclose = () => {
         this.stopPingLoop();
         this.ws = null;
+        this.isAuthenticated = false;
+        this.authInFlight = false;
         if (this.shouldReconnect) {
           this.setStatus('reconnecting');
           this.scheduleReconnect();
@@ -110,6 +156,8 @@ export class OnlineMultiplayerClient {
     this.shouldReconnect = false;
     this.activeSession = null;
     this.outboundQueue = [];
+    this.isAuthenticated = false;
+    this.authInFlight = false;
     this.stopPingLoop();
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
@@ -127,14 +175,23 @@ export class OnlineMultiplayerClient {
   }
 
   public send(msg: ClientToServerMessage): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (msg.type === 'ping' || msg.type === 'auth') {
       this.sendRaw(msg);
       return;
     }
-    if (msg.type !== 'match:input' && msg.type !== 'ping') {
+
+    if (this.ws && this.ws.readyState === WebSocket.OPEN && this.isAuthenticated) {
+      this.sendRaw(msg);
+      return;
+    }
+
+    if (msg.type !== 'match:input') {
       this.outboundQueue.push(msg);
     }
-    if (!this.ws && this.shouldReconnect) {
+
+    if (this.ws && this.ws.readyState === WebSocket.OPEN && !this.isAuthenticated) {
+      void this.authenticateSocket(false);
+    } else if (!this.ws && this.shouldReconnect) {
       this.connect();
     }
   }
@@ -143,7 +200,7 @@ export class OnlineMultiplayerClient {
    * Throttled input sender (~25 Hz for continuous movement, immediate flush on discrete actions).
    */
   public sendInput(input: InputSnapshot): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.isAuthenticated) return;
 
     const now = performance.now();
     const hasDiscrete =
@@ -172,6 +229,49 @@ export class OnlineMultiplayerClient {
     };
 
     this.sendRaw({ type: 'match:input', input });
+  }
+
+  private async authenticateSocket(forceRefresh: boolean): Promise<void> {
+    if (this.authInFlight) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.listeners.getAuthToken) return;
+
+    this.authInFlight = true;
+    try {
+      const idToken = await this.listeners.getAuthToken(forceRefresh);
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        this.authInFlight = false;
+        return;
+      }
+      if (!idToken) {
+        this.authInFlight = false;
+        return;
+      }
+      this.sendRaw({ type: 'auth', idToken });
+    } catch {
+      this.authInFlight = false;
+    }
+  }
+
+  private flushAfterAuth(): void {
+    // Automatically rejoin active match/room after network recovery
+    if (this.activeSession) {
+      const hasExplicitRoomCmd = this.outboundQueue.some(
+        (m) => m.type === 'room:create' || m.type === 'room:join' || m.type === 'room:reconnect',
+      );
+      if (!hasExplicitRoomCmd) {
+        this.sendRaw({
+          type: 'room:reconnect',
+          roomCode: this.activeSession.roomCode,
+          bootstrap: this.activeSession.bootstrap,
+        });
+      }
+    }
+
+    while (this.outboundQueue.length > 0) {
+      const queued = this.outboundQueue.shift();
+      if (queued) this.sendRaw(queued);
+    }
   }
 
   private sendRaw(msg: ClientToServerMessage): void {

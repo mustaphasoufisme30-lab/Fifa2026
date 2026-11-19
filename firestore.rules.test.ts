@@ -32,6 +32,14 @@ describe('Firestore Security Rules & Blueprint Integrity', () => {
     );
   });
 
+  it('enforces verified email auth and allows checking free room codes (resource == null)', () => {
+    assert.match(rulesSource, /request\.auth != null && request\.auth\.token\.email_verified == true/);
+    assert.match(
+      rulesSource,
+      /match \/rooms\/\{roomCode\}[\s\S]*?allow get:\s*if isSignedIn\(\)\s*&&\s*\(resource == null \|\|/,
+    );
+  });
+
   it('enforces schema validation on both create and update, terminal lock, and timestamp checks', () => {
     assert.match(rulesSource, /existing\(\)\.status != 'finished'/);
     assert.match(rulesSource, /incoming\(\)\.createdAt == request\.time/);

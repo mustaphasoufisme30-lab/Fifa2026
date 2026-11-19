@@ -29,12 +29,14 @@ import {
   createFirestoreRoom,
   deleteWaitingFirestoreRoom,
   ensurePlayerProfile,
+  FirestoreRoomDoc,
   joinFirestoreRoom,
   markFirestoreRoomFinished,
   markFirestoreRoomPlaying,
   recordOnlinePlayerMatchStats,
   sanitizeDisplayName,
   sanitizeRoomCode,
+  subscribeFirestoreRoom,
   updateFirestoreRoomLobby,
 } from './firebase/roomService';
 import { MatchEngine } from './game/matchEngine';
@@ -48,7 +50,11 @@ import {
   OnlineMultiplayerClient,
   OnlineSocketStatus,
 } from './multiplayer/onlineClient';
-import { OnlineRoomSnapshot, ServerToClientMessage } from './multiplayer/protocol';
+import {
+  OnlineRoomSnapshot,
+  RoomBootstrapData,
+  ServerToClientMessage,
+} from './multiplayer/protocol';
 import { applyCustomPlayerToTeam } from './players/customPlayer';
 import { pickRandomRobotTeam, resolveUserVsRobotPairing } from './teams/matchup';
 import { getTeamById, TEAMS } from './teams/teams';
@@ -69,6 +75,22 @@ import { TitlePanel, TitleScreen } from './ui/TitleScreen';
 import { TournamentScreen } from './ui/TournamentScreen';
 
 const CAMERA_CYCLE: CameraMode[] = ['tv', 'close', 'player'];
+
+function toRoomBootstrap(doc: FirestoreRoomDoc): RoomBootstrapData {
+  return {
+    hostUid: doc.hostUid,
+    hostName: doc.hostName,
+    hostTeamId: doc.hostTeamId,
+    hostFormation: doc.hostFormation,
+    hostReady: doc.hostReady,
+    guestUid: doc.guestUid || undefined,
+    guestName: doc.guestName || undefined,
+    guestTeamId: doc.guestTeamId || undefined,
+    guestFormation: doc.guestFormation,
+    guestReady: doc.guestReady,
+    halfDurationSeconds: doc.halfDurationSeconds,
+  };
+}
 
 export default function App() {
   const [saved, setSaved] = useState<SavedState>(() => loadSavedState());
@@ -269,13 +291,15 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = subscribeAuthState((user) => {
       setAuthUser(user);
+      authUserRef.current = user;
       if (user) {
         const cleanName = sanitizeDisplayName(user.displayName, user.uid);
         setOnlineNickname((prev) =>
           prev === 'Joueur' || prev.trim().length === 0 ? cleanName : prev,
         );
+        onlineClientRef.current?.reauthenticate();
         void ensurePlayerProfile(user.uid, cleanName).catch(() => {
-          // Non-fatal if offline or guest provider not yet enabled
+          // Non-fatal if offline
         });
       }
     });
@@ -286,6 +310,11 @@ export default function App() {
   const handleServerMessage = useCallback(
     (msg: ServerToClientMessage) => {
       switch (msg.type) {
+        case 'auth:error': {
+          setOnlineError(msg.message);
+          setOnlineBusy(false);
+          break;
+        }
         case 'room:state': {
           setOnlineRoom(msg.room);
           setOnlineSide(msg.yourSide);
@@ -346,7 +375,10 @@ export default function App() {
             setTeamVersion((v) => v + 1);
           }
 
-          if (authUserRef.current) {
+          // Only transition Firestore room waiting -> playing on the initial match.
+          // Rematches (matchNumber > 1) run cleanly on the authoritative WebSocket
+          // room without mutating the terminal-locked finished Firestore document.
+          if (authUserRef.current && msg.room.matchNumber === 1) {
             void markFirestoreRoomPlaying(msg.room.roomCode).catch(() => {});
           }
 
@@ -378,13 +410,15 @@ export default function App() {
 
           const user = authUserRef.current;
           if (user && homeSlot && awaySlot) {
-            void markFirestoreRoomFinished({
-              roomCode: msg.room.roomCode,
-              homeScore: msg.stats.homeScore,
-              awayScore: msg.stats.awayScore,
-              hostUid: homeSlot.uid,
-              guestUid: awaySlot.uid,
-            }).catch(() => {});
+            if (msg.room.matchNumber === 1) {
+              void markFirestoreRoomFinished({
+                roomCode: msg.room.roomCode,
+                homeScore: msg.stats.homeScore,
+                awayScore: msg.stats.awayScore,
+                hostUid: homeSlot.uid,
+                guestUid: awaySlot.uid,
+              }).catch(() => {});
+            }
 
             const myGoals = yourSide === 'home' ? msg.stats.homeScore : msg.stats.awayScore;
             const oppGoals = yourSide === 'home' ? msg.stats.awayScore : msg.stats.homeScore;
@@ -412,9 +446,14 @@ export default function App() {
     [inputManager],
   );
 
-  // Initialize WebSocket client lifecycle
+  // Initialize WebSocket client lifecycle with Firebase ID Token authentication
   useEffect(() => {
     const client = new OnlineMultiplayerClient({
+      getAuthToken: async (forceRefresh = false) => {
+        const current = authUserRef.current;
+        if (!current) return null;
+        return current.getIdToken(forceRefresh);
+      },
       onStatusChange: (st) => setSocketStatus(st),
       onMessage: (msg) => handleServerMessage(msg),
     });
@@ -425,6 +464,41 @@ export default function App() {
       onlineClientRef.current = null;
     };
   }, [handleServerMessage]);
+
+  // Keep waiting room synchronized with Cloud Firestore across devices/restarts
+  useEffect(() => {
+    const roomCode = onlineRoom?.roomCode;
+    if (!roomCode || shellState !== 'online' || !authUser) return;
+
+    const unsubscribe = subscribeFirestoreRoom(
+      roomCode,
+      (doc) => {
+        if (!doc) return;
+        const bootstrap = toRoomBootstrap(doc);
+        onlineClientRef.current?.updateSessionBootstrap(bootstrap);
+
+        const wsRoom = onlineRoomRef.current;
+        if (
+          wsRoom &&
+          wsRoom.roomCode === doc.roomCode &&
+          wsRoom.status === 'waiting' &&
+          doc.guestUid &&
+          wsRoom.players.length < 2
+        ) {
+          onlineClientRef.current?.send({
+            type: 'room:reconnect',
+            roomCode: doc.roomCode,
+            bootstrap,
+          });
+        }
+      },
+      () => {
+        // Non-fatal; WebSocket remains primary real-time channel
+      },
+    );
+
+    return unsubscribe;
+  }, [authUser, onlineRoom?.roomCode, shellState]);
 
   // Keep body data-state & online status mirrored
   useEffect(() => {
@@ -544,6 +618,11 @@ export default function App() {
       const msg = error instanceof Error ? error.message : String(error);
       if (msg.includes('popup-closed-by-user')) {
         setAuthError('Fenêtre de connexion Google fermée avant validation.');
+      } else if (msg.includes('unauthorized-domain')) {
+        const host = typeof window !== 'undefined' ? window.location.hostname : '';
+        setAuthError(
+          `Domaine non autorisé (${host}). Ajoutez ce domaine dans Firebase Console → Authentication → Settings → Authorized domains.`,
+        );
       } else {
         setAuthError(`Impossible de se connecter avec Google : ${msg}`);
       }
@@ -575,15 +654,15 @@ export default function App() {
         halfDurationSeconds: savedRef.current.settings.halfDurationSeconds,
       });
 
+      const bootstrap = toRoomBootstrap(created);
       onlineClientRef.current?.connect();
       onlineClientRef.current?.setActiveSession({
         roomCode: created.roomCode,
-        uid: user.uid,
+        bootstrap,
       });
       onlineClientRef.current?.send({
         type: 'room:create',
         roomCode: created.roomCode,
-        uid: user.uid,
         nickname: cleanName,
         teamId: created.hostTeamId,
         formation: created.hostFormation,
@@ -620,18 +699,19 @@ export default function App() {
           guestFormation: onlineFormation,
         });
 
+        const bootstrap = toRoomBootstrap(joined);
         onlineClientRef.current?.connect();
         onlineClientRef.current?.setActiveSession({
           roomCode: joined.roomCode,
-          uid: user.uid,
+          bootstrap,
         });
         onlineClientRef.current?.send({
           type: 'room:join',
           roomCode: joined.roomCode,
-          uid: user.uid,
           nickname: cleanName,
           teamId: joined.guestTeamId || onlineTeamId,
           formation: onlineFormation,
+          bootstrap,
         });
       } catch (error) {
         setOnlineError(

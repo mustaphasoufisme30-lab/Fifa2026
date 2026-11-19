@@ -6,6 +6,7 @@ import {
   OnlinePlayerSlot,
   OnlineRoomSnapshot,
   OnlineSoundEvent,
+  RoomBootstrapData,
   ServerToClientMessage,
 } from './protocol';
 
@@ -24,6 +25,7 @@ interface LiveRoom {
   roomCode: string;
   status: 'waiting' | 'playing' | 'finished';
   halfDurationSeconds: number;
+  matchNumber: number;
   players: LivePlayer[];
   engine: MatchEngine | null;
   pendingEvents: OnlineSoundEvent[];
@@ -108,6 +110,7 @@ function normalizeHalfDuration(sec?: number): number {
 
 export class OnlineRoomManager {
   private clients = new Map<string, ClientTransport>();
+  private authenticatedUids = new Map<string, string>();
   private clientToRoom = new Map<string, string>();
   private rooms = new Map<string, LiveRoom>();
 
@@ -121,6 +124,18 @@ export class OnlineRoomManager {
     this.broadcastPresence();
   }
 
+  public authenticateClient(clientId: string, verifiedUid: string): boolean {
+    if (!this.clients.has(clientId)) return false;
+    const cleanUid = verifiedUid.trim();
+    if (!cleanUid) return false;
+    this.authenticatedUids.set(clientId, cleanUid);
+    return true;
+  }
+
+  public getAuthenticatedUid(clientId: string): string | null {
+    return this.authenticatedUids.get(clientId) ?? null;
+  }
+
   public getOnlineCount(): number {
     return this.clients.size;
   }
@@ -132,6 +147,7 @@ export class OnlineRoomManager {
 
   public removeClient(clientId: string): void {
     this.clients.delete(clientId);
+    this.authenticatedUids.delete(clientId);
     const roomCode = this.clientToRoom.get(clientId);
     this.clientToRoom.delete(clientId);
 
@@ -179,21 +195,49 @@ export class OnlineRoomManager {
     const client = this.clients.get(clientId);
     if (!client) return;
 
-    switch (msg.type) {
-      case 'ping':
-        client.send({ type: 'pong', clientTime: msg.clientTime, serverTime: Date.now() });
-        return;
+    if (msg.type === 'ping') {
+      client.send({ type: 'pong', clientTime: msg.clientTime, serverTime: Date.now() });
+      return;
+    }
 
+    if (msg.type === 'auth') {
+      // Token verification is handled asynchronously in server.ts via verifyIdToken
+      return;
+    }
+
+    const verifiedUid = this.authenticatedUids.get(clientId);
+    if (!verifiedUid) {
+      client.send({
+        type: 'auth:error',
+        message: 'Authentification Firebase requise avant toute action multijoueur.',
+      });
+      return;
+    }
+
+    if (
+      'uid' in msg &&
+      typeof msg.uid === 'string' &&
+      msg.uid.trim().length > 0 &&
+      msg.uid.trim() !== verifiedUid
+    ) {
+      client.send({
+        type: 'auth:error',
+        message: 'Identité Firebase incohérente avec le jeton authentifié.',
+      });
+      return;
+    }
+
+    switch (msg.type) {
       case 'room:create':
-        this.handleCreateRoom(client, msg);
+        this.handleCreateRoom(client, verifiedUid, msg);
         return;
 
       case 'room:join':
-        this.handleJoinRoom(client, msg);
+        this.handleJoinRoom(client, verifiedUid, msg);
         return;
 
       case 'room:reconnect':
-        this.handleReconnect(client, msg.roomCode, msg.uid);
+        this.handleReconnect(client, msg.roomCode, verifiedUid, msg.bootstrap);
         return;
 
       case 'room:leave':
@@ -326,6 +370,7 @@ export class OnlineRoomManager {
 
   private handleCreateRoom(
     client: ClientTransport,
+    verifiedUid: string,
     msg: Extract<ClientToServerMessage, { type: 'room:create' }>,
   ): void {
     this.leaveCurrentRoom(client.id);
@@ -338,8 +383,8 @@ export class OnlineRoomManager {
 
     const host: LivePlayer = {
       clientId: client.id,
-      uid: msg.uid || client.id,
-      nickname: sanitizeNickname(msg.nickname, msg.uid || client.id),
+      uid: verifiedUid,
+      nickname: sanitizeNickname(msg.nickname, verifiedUid),
       side: 'home',
       teamId: normalizeTeamId(msg.teamId),
       formation: normalizeFormation(msg.formation),
@@ -354,6 +399,7 @@ export class OnlineRoomManager {
       roomCode: code,
       status: 'waiting',
       halfDurationSeconds: normalizeHalfDuration(msg.halfDurationSeconds),
+      matchNumber: 0,
       players: [host],
       engine: null,
       pendingEvents: [],
@@ -367,8 +413,78 @@ export class OnlineRoomManager {
     this.broadcastRoomState(room);
   }
 
+  private hydrateRoomFromBootstrap(
+    code: string,
+    bootstrap: RoomBootstrapData,
+    client: ClientTransport,
+    verifiedUid: string,
+  ): LiveRoom | null {
+    const hostUid = (bootstrap.hostUid || '').trim();
+    const guestUid = (bootstrap.guestUid || '').trim();
+    if (!hostUid) return null;
+
+    const isHost = verifiedUid === hostUid;
+    const isGuest = guestUid.length > 0 && verifiedUid === guestUid;
+    if (!isHost && !isGuest) {
+      return null;
+    }
+
+    this.leaveCurrentRoom(client.id);
+
+    const hostTeamId = normalizeTeamId(bootstrap.hostTeamId);
+    const host: LivePlayer = {
+      clientId: isHost ? client.id : `pending_host_${code}`,
+      uid: hostUid,
+      nickname: sanitizeNickname(bootstrap.hostName, hostUid),
+      side: 'home',
+      teamId: hostTeamId,
+      formation: normalizeFormation(bootstrap.hostFormation),
+      ready: Boolean(bootstrap.hostReady),
+      connected: isHost,
+      transport: isHost ? client : null,
+      latestInput: createNeutralInput(),
+      disconnectedAt: isHost ? null : Date.now(),
+    };
+
+    const players: LivePlayer[] = [host];
+    if (guestUid && guestUid !== hostUid) {
+      players.push({
+        clientId: isGuest ? client.id : `pending_guest_${code}`,
+        uid: guestUid,
+        nickname: sanitizeNickname(bootstrap.guestName || '', guestUid),
+        side: 'away',
+        teamId: pickDistinctTeam(hostTeamId, bootstrap.guestTeamId),
+        formation: normalizeFormation(bootstrap.guestFormation ?? '4-3-3'),
+        ready: Boolean(bootstrap.guestReady),
+        connected: isGuest,
+        transport: isGuest ? client : null,
+        latestInput: createNeutralInput(),
+        disconnectedAt: isGuest ? null : Date.now(),
+      });
+    }
+
+    const room: LiveRoom = {
+      roomCode: code,
+      status: 'waiting',
+      halfDurationSeconds: normalizeHalfDuration(bootstrap.halfDurationSeconds),
+      matchNumber: 0,
+      players,
+      engine: null,
+      pendingEvents: [],
+      tick: 0,
+      broadcastCounter: 0,
+      pausedForDisconnect: false,
+    };
+
+    this.rooms.set(code, room);
+    this.clientToRoom.set(client.id, code);
+    this.broadcastRoomState(room);
+    return room;
+  }
+
   private handleJoinRoom(
     client: ClientTransport,
+    verifiedUid: string,
     msg: Extract<ClientToServerMessage, { type: 'room:join' }>,
   ): void {
     const code = sanitizeRoomCode(msg.roomCode);
@@ -382,6 +498,12 @@ export class OnlineRoomManager {
 
     const room = this.rooms.get(code);
     if (!room) {
+      if (msg.bootstrap) {
+        const hydrated = this.hydrateRoomFromBootstrap(code, msg.bootstrap, client, verifiedUid);
+        if (hydrated) {
+          return;
+        }
+      }
       client.send({
         type: 'room:error',
         message: `Aucune partie active trouvée pour le code ${code}.`,
@@ -389,10 +511,10 @@ export class OnlineRoomManager {
       return;
     }
 
-    // Reconnect seamlessly if the same Firebase UID is already in this room!
-    const existingByUid = room.players.find((p) => p.uid === msg.uid && msg.uid.length > 0);
+    // Reconnect seamlessly if the same verified Firebase UID is already in this room!
+    const existingByUid = room.players.find((p) => p.uid === verifiedUid);
     if (existingByUid) {
-      this.handleReconnect(client, code, msg.uid);
+      this.handleReconnect(client, code, verifiedUid, msg.bootstrap);
       return;
     }
 
@@ -419,8 +541,8 @@ export class OnlineRoomManager {
 
     const guest: LivePlayer = {
       clientId: client.id,
-      uid: msg.uid || client.id,
-      nickname: sanitizeNickname(msg.nickname, msg.uid || client.id),
+      uid: verifiedUid,
+      nickname: sanitizeNickname(msg.nickname, verifiedUid),
       side: 'away',
       teamId: assignedTeam,
       formation: normalizeFormation(msg.formation),
@@ -436,15 +558,64 @@ export class OnlineRoomManager {
     this.broadcastRoomState(room);
   }
 
-  private handleReconnect(client: ClientTransport, rawCode: string, uid: string): void {
+  private handleReconnect(
+    client: ClientTransport,
+    rawCode: string,
+    verifiedUid: string,
+    bootstrap?: RoomBootstrapData,
+  ): void {
     const code = sanitizeRoomCode(rawCode);
     const room = this.rooms.get(code);
     if (!room) {
+      if (code.length === 5 && bootstrap) {
+        const hydrated = this.hydrateRoomFromBootstrap(code, bootstrap, client, verifiedUid);
+        if (hydrated) {
+          return;
+        }
+      }
       client.send({ type: 'room:error', message: `Partie ${code} introuvable.` });
       return;
     }
 
-    const slot = room.players.find((p) => p.uid === uid);
+    let slot = room.players.find((p) => p.uid === verifiedUid);
+    if (!slot && room.status === 'waiting' && bootstrap && room.players.length < 2) {
+      // Allow verified Firestore participant to attach if the room was recreated on a new instance
+      const isBootstrapGuest = Boolean(bootstrap.guestUid) && bootstrap.guestUid === verifiedUid;
+      const isBootstrapHost = bootstrap.hostUid === verifiedUid;
+      if (isBootstrapGuest || isBootstrapHost) {
+        this.leaveCurrentRoom(client.id);
+        const existingPlayer = room.players[0];
+        const attachedTeam = pickDistinctTeam(
+          existingPlayer.teamId,
+          isBootstrapGuest ? bootstrap.guestTeamId : bootstrap.hostTeamId,
+        );
+        slot = {
+          clientId: client.id,
+          uid: verifiedUid,
+          nickname: sanitizeNickname(
+            isBootstrapGuest ? bootstrap.guestName || '' : bootstrap.hostName,
+            verifiedUid,
+          ),
+          side: existingPlayer.side === 'home' ? 'away' : 'home',
+          teamId: attachedTeam,
+          formation: normalizeFormation(
+            isBootstrapGuest
+              ? (bootstrap.guestFormation ?? '4-3-3')
+              : bootstrap.hostFormation,
+          ),
+          ready: Boolean(isBootstrapGuest ? bootstrap.guestReady : bootstrap.hostReady),
+          connected: true,
+          transport: client,
+          latestInput: createNeutralInput(),
+          disconnectedAt: null,
+        };
+        room.players.push(slot);
+        this.clientToRoom.set(client.id, code);
+        this.broadcastRoomState(room);
+        return;
+      }
+    }
+
     if (!slot) {
       client.send({ type: 'room:error', message: 'Vous ne faites pas partie de cette salle.' });
       return;
@@ -532,6 +703,14 @@ export class OnlineRoomManager {
       return;
     }
 
+    if (room.players.some((p) => !p.connected)) {
+      this.clients.get(clientId)?.send({
+        type: 'room:error',
+        message: 'En attente de la connexion temps réel du deuxième joueur...',
+      });
+      return;
+    }
+
     this.startRoomEngine(room);
   }
 
@@ -541,6 +720,13 @@ export class OnlineRoomManager {
     const room = this.rooms.get(code);
     if (!room || room.players.length < 2) return;
     if (room.status !== 'finished') return;
+    if (room.players.some((p) => !p.connected)) {
+      this.clients.get(clientId)?.send({
+        type: 'room:error',
+        message: 'Les deux joueurs doivent être connectés pour lancer la revanche.',
+      });
+      return;
+    }
 
     this.startRoomEngine(room);
   }
@@ -561,6 +747,7 @@ export class OnlineRoomManager {
     room.tick = 0;
     room.broadcastCounter = 0;
     room.pausedForDisconnect = false;
+    room.matchNumber += 1;
     room.status = 'playing';
 
     const homeTeam = getTeamById(home.teamId);
@@ -662,6 +849,7 @@ export class OnlineRoomManager {
       roomCode: room.roomCode,
       status: room.status,
       halfDurationSeconds: room.halfDurationSeconds,
+      matchNumber: room.matchNumber,
       players: room.players.map((p) => ({
         clientId: p.clientId,
         uid: p.uid,

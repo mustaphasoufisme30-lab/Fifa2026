@@ -183,10 +183,12 @@ service cloud.firestore {
     // =========================================================================
 
     match /rooms/{roomCode} {
-      // Participants can always read their room; other signed-in users can only
-      // get a waiting room by its exact 5-character room code to join.
+      // Participants can always read their room; other signed-in users can check
+      // whether a 5-character room code is free (resource == null) or get a
+      // waiting room by its exact code to join.
       allow get: if isSignedIn() &&
-        (existing().hostUid == request.auth.uid ||
+        (resource == null ||
+         existing().hostUid == request.auth.uid ||
          existing().guestUid == request.auth.uid ||
          existing().status == 'waiting');
 

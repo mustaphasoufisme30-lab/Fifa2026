@@ -29,11 +29,26 @@ export interface OnlinePlayerSlot {
   connected: boolean;
 }
 
+export interface RoomBootstrapData {
+  hostUid: string;
+  hostName: string;
+  hostTeamId: string;
+  hostFormation: FormationId;
+  hostReady?: boolean;
+  guestUid?: string;
+  guestName?: string;
+  guestTeamId?: string;
+  guestFormation?: FormationId;
+  guestReady?: boolean;
+  halfDurationSeconds: number;
+}
+
 export interface OnlineRoomSnapshot {
   roomCode: string;
   status: 'waiting' | 'playing' | 'finished';
   players: OnlinePlayerSlot[];
   halfDurationSeconds: number;
+  matchNumber: number;
 }
 
 export interface CompactPlayerNetState {
@@ -76,9 +91,13 @@ export interface OnlineMatchSnapshot {
 
 export type ClientToServerMessage =
   | {
+      type: 'auth';
+      idToken: string;
+    }
+  | {
       type: 'room:create';
       roomCode?: string;
-      uid: string;
+      uid?: string;
       nickname: string;
       teamId: string;
       formation: FormationId;
@@ -87,15 +106,17 @@ export type ClientToServerMessage =
   | {
       type: 'room:join';
       roomCode: string;
-      uid: string;
+      uid?: string;
       nickname: string;
       teamId: string;
       formation: FormationId;
+      bootstrap?: RoomBootstrapData;
     }
   | {
       type: 'room:reconnect';
       roomCode: string;
-      uid: string;
+      uid?: string;
+      bootstrap?: RoomBootstrapData;
     }
   | { type: 'room:leave' }
   | {
@@ -112,6 +133,8 @@ export type ClientToServerMessage =
 
 export type ServerToClientMessage =
   | { type: 'connected'; clientId: string; onlineCount: number }
+  | { type: 'auth:ok'; uid: string }
+  | { type: 'auth:error'; message: string }
   | { type: 'presence'; onlineCount: number }
   | { type: 'pong'; clientTime: number; serverTime: number }
   | { type: 'room:state'; room: OnlineRoomSnapshot; yourSide: TeamSide }

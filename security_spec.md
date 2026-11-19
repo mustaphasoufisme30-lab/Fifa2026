@@ -23,7 +23,7 @@
 - `delete`: Denied (preserves player history integrity).
 
 ### `/rooms/{roomCode}`
-- `get`: Allowed if authenticated AND (`existing().hostUid == request.auth.uid || existing().guestUid == request.auth.uid || existing().status == 'waiting'`). Allows joining a known room code while hiding active/finished matches from outsiders.
+- `get`: Allowed if authenticated AND (`resource == null || existing().hostUid == request.auth.uid || existing().guestUid == request.auth.uid || existing().status == 'waiting'`). Allows checking whether a newly generated 5-character room code is free and joining a known waiting room code while hiding active/finished matches from outsiders.
 - `list`: Allowed ONLY for rooms where the caller is a participant (`resource.data.hostUid == request.auth.uid || resource.data.guestUid == request.auth.uid`). Never allows blanket room listing.
 - `create`: Authenticated user becomes host (`hostUid == request.auth.uid`), `roomCode == roomCode` doc ID matching `^[A-Z0-9]{5}$`, `guestUid == ''`, `guestName == ''`, `guestTeamId == ''`, `guestFormation == '4-3-3'`, `guestReady == false`, `status == 'waiting'`, `homeScore == 0`, `awayScore == 0`, `winnerUid == ''`, `createdAt == request.time`, `updatedAt == request.time`.
 - `update`: Strict schema validation (`isValidRoom(incoming())`) + immutable `roomCode`, `hostUid`, `halfDurationSeconds`, `createdAt` + terminal lock (`existing().status != 'finished'`) + `updatedAt == request.time` + exactly one action branch:
@@ -34,5 +34,6 @@
   5. **Match Finish (Terminal Lock)**: Caller is host or guest, `existing().status == 'playing'`, transitions `status` to `'finished'`, modifying ONLY `['status', 'homeScore', 'awayScore', 'winnerUid', 'updatedAt']`, enforcing `0 <= homeScore <= 30`, `0 <= awayScore <= 30`, and `winnerUid` strictly matches the score outcome (`hostUid`, `guestUid`, or `''` on draw).
 - `delete`: Host only while `existing().status == 'waiting'`. Active or finished matches cannot be deleted.
 
-## 4. Real-Time Anti-Cheat Match Authority
+## 4. Real-Time Anti-Cheat Match Authority & WebSocket Token Verification
+- Every WebSocket connection on `/ws` must authenticate with a valid Firebase ID Token (`auth` message verified server-side via Firebase Admin `verifyIdToken` with `email_verified == true`) before executing `room:create`, `room:join`, `room:reconnect`, or any match/room command. The server derives the player's `uid` exclusively from the verified token and never trusts client-supplied UIDs.
 - Real-time match simulation (physics, goals, clock, score) runs exclusively in the server-authoritative `MatchEngine` over WebSockets (`/ws`). Clients only send `InputSnapshot` actions and cannot directly inject goals, scores, or clock changes.

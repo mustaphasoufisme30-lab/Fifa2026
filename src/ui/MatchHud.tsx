@@ -1,14 +1,23 @@
 import { useEffect, useRef } from 'react';
-import { Camera, FastForward, Pause, Volume2, VolumeX } from 'lucide-react';
+import { Camera, FastForward, Pause, Volume2, VolumeX, WifiOff } from 'lucide-react';
 import { CameraMode, MatchHudSnapshot, SetPieceType } from '../core/types';
 import { InputManager } from '../controls/inputManager';
+import { OnlineSocketStatus } from '../multiplayer/onlineClient';
 import { TouchControls } from './TouchControls';
+
+export interface OnlineMatchOverlayInfo {
+  socketStatus: OnlineSocketStatus;
+  opponentDisconnectedMsg: string | null;
+  onRetryReconnect: () => void;
+  onQuitOnline: () => void;
+}
 
 interface MatchHudProps {
   snapshot: MatchHudSnapshot;
   inputManager: InputManager;
   soundEnabled: boolean;
   showTouchControls: boolean;
+  onlineOverlay?: OnlineMatchOverlayInfo | null;
   onCycleCamera: () => void;
   onToggleSound: () => void;
   onPause: () => void;
@@ -35,6 +44,7 @@ export function MatchHud({
   inputManager,
   soundEnabled,
   showTouchControls,
+  onlineOverlay = null,
   onCycleCamera,
   onToggleSound,
   onPause,
@@ -374,6 +384,55 @@ export function MatchHud({
           shotCharge={snapshot.controlledShotCharge}
         />
       )}
+
+      {/* Online Disconnect / Reconnection Overlay ("Connexion perdue") */}
+      {onlineOverlay &&
+        (onlineOverlay.socketStatus === 'reconnecting' ||
+          onlineOverlay.socketStatus === 'disconnected' ||
+          onlineOverlay.opponentDisconnectedMsg !== null) && (
+          <div
+            data-testid="online-connection-lost"
+            className="fixed inset-0 z-40 flex items-center justify-center bg-[#040912]/82 p-4 pointer-events-auto"
+          >
+            <div
+              role="dialog"
+              aria-label="Connexion perdue"
+              className="w-full max-w-sm rounded-lg bg-[#0d192a] border border-amber-400/50 p-6 text-center shadow-2xl"
+            >
+              <div className="w-12 h-12 mx-auto rounded-full bg-amber-500/15 border border-amber-400/40 flex items-center justify-center">
+                <WifiOff className="w-6 h-6 text-amber-400" />
+              </div>
+              <h2 className="font-display font-extrabold text-2xl text-white uppercase tracking-wide mt-3">
+                Connexion perdue
+              </h2>
+              <p className="text-xs sm:text-sm text-slate-300 mt-1.5 leading-relaxed">
+                {onlineOverlay.socketStatus === 'reconnecting' ||
+                onlineOverlay.socketStatus === 'disconnected'
+                  ? 'Reconnexion automatique en cours. Le match reprendra dès le retour de la connexion...'
+                  : onlineOverlay.opponentDisconnectedMsg}
+              </p>
+              <div className="mt-5 flex gap-2.5">
+                {(onlineOverlay.socketStatus === 'reconnecting' ||
+                  onlineOverlay.socketStatus === 'disconnected') && (
+                  <button
+                    type="button"
+                    onClick={onlineOverlay.onRetryReconnect}
+                    className="flex-1 h-10 rounded-md bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-display font-bold text-sm uppercase tracking-wider cursor-pointer"
+                  >
+                    Réessayer
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onlineOverlay.onQuitOnline}
+                  className="flex-1 h-10 rounded-md bg-[#162740] hover:bg-[#1f3557] border border-white/15 text-slate-200 font-display font-bold text-sm uppercase tracking-wider cursor-pointer"
+                >
+                  Quitter
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
     </div>
   );
 }

@@ -22,10 +22,17 @@ export interface TournamentMatchSummary {
   awayPenalties: number | null;
 }
 
+export interface OnlineMatchSummary {
+  homePlayerName: string;
+  awayPlayerName: string;
+  yourSide: 'home' | 'away';
+}
+
 interface PauseModalProps {
   homeFormation: FormationId;
   homeMentality: TacticalMentality;
   isTournament?: boolean;
+  isOnline?: boolean;
   onSelectFormation: (id: FormationId) => void;
   onSelectMentality: (m: TacticalMentality) => void;
   onResume: () => void;
@@ -38,6 +45,7 @@ export function PauseModal({
   homeFormation,
   homeMentality,
   isTournament = false,
+  isOnline = false,
   onSelectFormation,
   onSelectMentality,
   onResume,
@@ -109,15 +117,17 @@ export function PauseModal({
             onClick={onResume}
             className="w-full h-11 rounded-md bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-display font-bold text-lg tracking-wider uppercase cursor-pointer"
           >
-            Resume
+            {isOnline ? 'Reprendre' : 'Resume'}
           </button>
-          <button
-            type="button"
-            onClick={onRestart}
-            className="w-full h-11 rounded-md bg-[#162740] hover:bg-[#1f3557] border border-white/15 text-white font-display font-bold text-base tracking-wider uppercase cursor-pointer"
-          >
-            Restart Match
-          </button>
+          {!isOnline && (
+            <button
+              type="button"
+              onClick={onRestart}
+              className="w-full h-11 rounded-md bg-[#162740] hover:bg-[#1f3557] border border-white/15 text-white font-display font-bold text-base tracking-wider uppercase cursor-pointer"
+            >
+              Restart Match
+            </button>
+          )}
           {isTournament && onReturnToBracket && (
             <button
               type="button"
@@ -132,7 +142,7 @@ export function PauseModal({
             onClick={onMainMenu}
             className="w-full h-11 rounded-md bg-transparent hover:bg-white/5 border border-white/15 text-slate-300 font-display font-bold text-base tracking-wider uppercase cursor-pointer"
           >
-            Main Menu
+            {isOnline ? 'Quitter le match' : 'Main Menu'}
           </button>
         </div>
       </div>
@@ -145,6 +155,7 @@ interface FullTimeModalProps {
   awayTeam: TeamConfig;
   stats: MatchStats;
   tournamentSummary?: TournamentMatchSummary | null;
+  onlineSummary?: OnlineMatchSummary | null;
   onPlayAgain: () => void;
   onViewBracket?: () => void;
   onMainMenu: () => void;
@@ -155,6 +166,7 @@ export function FullTimeModal({
   awayTeam,
   stats,
   tournamentSummary = null,
+  onlineSummary = null,
   onPlayAgain,
   onViewBracket,
   onMainMenu,
@@ -164,17 +176,23 @@ export function FullTimeModal({
     totalPoss > 0 ? Math.round((stats.homePossessionSeconds / totalPoss) * 100) : 50;
   const awayPossPct = 100 - homePossPct;
 
-  const outcomeLabel = tournamentSummary
-    ? tournamentSummary.isChampion
-      ? 'TOURNAMENT CHAMPIONS!'
-      : tournamentSummary.advanced
-        ? 'ADVANCED TO NEXT ROUND'
-        : 'ELIMINATED FROM CUP'
-    : stats.homeScore > stats.awayScore
-      ? `${homeTeam.name} Victory`
+  const outcomeLabel = onlineSummary
+    ? stats.homeScore > stats.awayScore
+      ? `VICTOIRE · ${onlineSummary.homePlayerName}`
       : stats.awayScore > stats.homeScore
-        ? `${awayTeam.name} Victory`
-        : 'Full Time Draw';
+        ? `VICTOIRE · ${onlineSummary.awayPlayerName}`
+        : 'MATCH NUL'
+    : tournamentSummary
+      ? tournamentSummary.isChampion
+        ? 'TOURNAMENT CHAMPIONS!'
+        : tournamentSummary.advanced
+          ? 'ADVANCED TO NEXT ROUND'
+          : 'ELIMINATED FROM CUP'
+      : stats.homeScore > stats.awayScore
+        ? `${homeTeam.name} Victory`
+        : stats.awayScore > stats.homeScore
+          ? `${awayTeam.name} Victory`
+          : 'Full Time Draw';
 
   const hasPens =
     tournamentSummary !== null &&
@@ -191,18 +209,22 @@ export function FullTimeModal({
         <div className="text-center">
           <div
             className={`text-xs font-semibold uppercase tracking-widest ${
-              tournamentSummary
-                ? tournamentSummary.isChampion
-                  ? 'text-amber-400'
-                  : tournamentSummary.advanced
-                    ? 'text-emerald-400'
-                    : 'text-rose-400'
-                : 'text-emerald-400'
+              onlineSummary
+                ? 'text-sky-400'
+                : tournamentSummary
+                  ? tournamentSummary.isChampion
+                    ? 'text-amber-400'
+                    : tournamentSummary.advanced
+                      ? 'text-emerald-400'
+                      : 'text-rose-400'
+                  : 'text-emerald-400'
             }`}
           >
-            {tournamentSummary
-              ? `FULL TIME · ${tournamentSummary.roundLabel.toUpperCase()}`
-              : 'FULL TIME'}
+            {onlineSummary
+              ? 'FIN DU MATCH EN LIGNE'
+              : tournamentSummary
+                ? `FULL TIME · ${tournamentSummary.roundLabel.toUpperCase()}`
+                : 'FULL TIME'}
           </div>
           <h2 className="font-display font-extrabold text-3xl text-white mt-1">
             {outcomeLabel}
@@ -216,7 +238,9 @@ export function FullTimeModal({
               <div className="font-display font-bold text-xl text-white">
                 {homeTeam.shortName}
               </div>
-              <div className="text-xs text-slate-400">{homeTeam.name}</div>
+              <div className="text-xs text-slate-400">
+                {onlineSummary ? onlineSummary.homePlayerName : homeTeam.name}
+              </div>
             </div>
             <div className="font-display font-extrabold text-4xl text-white tabular-nums">
               {stats.homeScore} - {stats.awayScore}
@@ -225,7 +249,9 @@ export function FullTimeModal({
               <div className="font-display font-bold text-xl text-white">
                 {awayTeam.shortName}
               </div>
-              <div className="text-xs text-slate-400">{awayTeam.name}</div>
+              <div className="text-xs text-slate-400">
+                {onlineSummary ? onlineSummary.awayPlayerName : awayTeam.name}
+              </div>
             </div>
           </div>
           {hasPens && tournamentSummary && (
@@ -286,7 +312,7 @@ export function FullTimeModal({
               onClick={onPlayAgain}
               className="flex-1 h-11 rounded-md bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-display font-bold text-lg tracking-wider uppercase cursor-pointer"
             >
-              Play Again
+              {onlineSummary ? 'REJOUER' : 'Play Again'}
             </button>
           )}
           <button
@@ -294,7 +320,7 @@ export function FullTimeModal({
             onClick={onMainMenu}
             className="h-11 px-4 rounded-md bg-[#162740] hover:bg-[#1f3557] border border-white/15 text-white font-display font-bold text-base tracking-wider uppercase cursor-pointer"
           >
-            Menu
+            {onlineSummary ? 'QUITTER' : 'Menu'}
           </button>
         </div>
       </div>

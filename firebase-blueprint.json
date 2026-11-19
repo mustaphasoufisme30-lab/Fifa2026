@@ -1,0 +1,172 @@
+{
+  "entities": {
+    "PlayerProfile": {
+      "title": "PlayerProfile",
+      "description": "Public competitive statistics and display profile for an authenticated FiFA 2026 player. Contains no email or sensitive PII.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID matching the document ID."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Public in-game nickname (1 to 24 characters)."
+        },
+        "matchesPlayed": {
+          "type": "integer",
+          "description": "Total completed online matches."
+        },
+        "wins": {
+          "type": "integer",
+          "description": "Total online match victories."
+        },
+        "draws": {
+          "type": "integer",
+          "description": "Total online match draws."
+        },
+        "losses": {
+          "type": "integer",
+          "description": "Total online match defeats."
+        },
+        "goalsScored": {
+          "type": "integer",
+          "description": "Total goals scored in online matches."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Firestore server timestamp when the profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Firestore server timestamp when the profile was last updated."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "matchesPlayed",
+        "wins",
+        "draws",
+        "losses",
+        "goalsScored",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "OnlineRoom": {
+      "title": "OnlineRoom",
+      "description": "1v1 online match room keyed by a unique 5-character room code (e.g. A7K92). Tracks lobby membership, club selection, and immutable final result.",
+      "type": "object",
+      "properties": {
+        "roomCode": {
+          "type": "string",
+          "description": "5-character uppercase alphanumeric room code matching the document ID."
+        },
+        "hostUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the room creator (Home side)."
+        },
+        "hostName": {
+          "type": "string",
+          "description": "Public display name of the host."
+        },
+        "hostTeamId": {
+          "type": "string",
+          "description": "Club ID selected by the host."
+        },
+        "hostFormation": {
+          "type": "string",
+          "description": "Tactical formation selected by the host."
+        },
+        "hostReady": {
+          "type": "boolean",
+          "description": "Whether the host is ready to kick off."
+        },
+        "guestUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the joining opponent (Away side), or empty string while waiting."
+        },
+        "guestName": {
+          "type": "string",
+          "description": "Public display name of the guest, or empty string while waiting."
+        },
+        "guestTeamId": {
+          "type": "string",
+          "description": "Club ID selected by the guest (always distinct from hostTeamId once joined)."
+        },
+        "guestFormation": {
+          "type": "string",
+          "description": "Tactical formation selected by the guest."
+        },
+        "guestReady": {
+          "type": "boolean",
+          "description": "Whether the guest is ready to kick off."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "playing", "finished"],
+          "description": "Lifecycle state of the match room."
+        },
+        "homeScore": {
+          "type": "integer",
+          "description": "Final or current Home score (0..30)."
+        },
+        "awayScore": {
+          "type": "integer",
+          "description": "Final or current Away score (0..30)."
+        },
+        "winnerUid": {
+          "type": "string",
+          "description": "UID of the winning player when finished, or empty string for draw/in-progress."
+        },
+        "halfDurationSeconds": {
+          "type": "integer",
+          "description": "Half duration in seconds (60, 120, or 180)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Firestore server timestamp when room was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Firestore server timestamp when room was last updated."
+        }
+      },
+      "required": [
+        "roomCode",
+        "hostUid",
+        "hostName",
+        "hostTeamId",
+        "hostFormation",
+        "hostReady",
+        "guestUid",
+        "guestName",
+        "guestTeamId",
+        "guestFormation",
+        "guestReady",
+        "status",
+        "homeScore",
+        "awayScore",
+        "winnerUid",
+        "halfDurationSeconds",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/players/{uid}": {
+      "schema": "PlayerProfile",
+      "description": "Authenticated player public stats profile. Only readable by authenticated players by exact UID (no collection list); only writable by the owner UID."
+    },
+    "/rooms/{roomCode}": {
+      "schema": "OnlineRoom",
+      "description": "Online 1v1 match room keyed by 5-character room code. Supports exact-code lookup while waiting, participant-only updates with strict field whitelists, and terminal lock once finished."
+    }
+  }
+}

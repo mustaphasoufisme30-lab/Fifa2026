@@ -32,6 +32,11 @@ import {
   TeamSide,
   Vec3,
 } from '../core/types';
+import {
+  CompactPlayerNetState,
+  OnlineMatchSnapshot,
+  OnlineSoundEvent,
+} from '../multiplayer/protocol';
 import { ReplayRecorder } from './replayRecorder';
 import {
   classifyTackleFoul,
@@ -57,10 +62,20 @@ export interface MatchEngineCallbacks {
   onHudUpdate: (snapshot: MatchHudSnapshot) => void;
   onCameraTrauma: (amount: number) => void;
   onMatchFinished: (stats: MatchStats) => void;
+  onSoundEvent?: (event: OnlineSoundEvent) => void;
 }
 
 const GOAL_IMPACT_DURATION = 0.85;
 const GOAL_REPLAY_DURATION = 3.25;
+
+interface NetPlayerTarget {
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vz: number;
+  facingAngle: number;
+}
 
 export class MatchEngine {
   public homeTeam: TeamConfig;
@@ -81,6 +96,11 @@ export class MatchEngine {
   public matchSeconds = 0;
   public cameraMode: CameraMode = 'tv';
 
+  /** Online multiplayer configuration */
+  public awayHumanControl = false;
+  public localSide: TeamSide = 'home';
+  public isOnlineClient = false;
+
   public stats: MatchStats;
   public goalBanner: MatchHudSnapshot['goalBanner'] = null;
   public setPiece: SetPieceInfo | null = null;
@@ -93,13 +113,20 @@ export class MatchEngine {
   private kickoffTeam: TeamSide = 'home';
   private hudEmitAccumulator = 0;
   private shotCharge = 0;
+  private awayShotCharge = 0;
   private callbacks: MatchEngineCallbacks;
   private replayRecorder = new ReplayRecorder();
   private replayBallProxy: BallState;
   private replayPlayerProxies: PlayerState[] = [];
 
-  public getShotCharge(): number {
-    return this.shotCharge;
+  // Client-side interpolation targets for online multiplayer
+  private netBallTarget: { x: number; y: number; z: number; vx: number; vy: number; vz: number } | null =
+    null;
+  private netPlayerTargets: Map<string, NetPlayerTarget> = new Map();
+  private hasReceivedNetSnapshot = false;
+
+  public getShotCharge(side: TeamSide = this.localSide): number {
+    return side === 'away' ? this.awayShotCharge : this.shotCharge;
   }
 
   constructor(
@@ -127,6 +154,40 @@ export class MatchEngine {
     this.replayBallProxy = this.createEmptyBall();
     this.stats = this.createEmptyStats();
     this.rebuildTeams();
+  }
+
+  private emitSound(event: OnlineSoundEvent): void {
+    this.callbacks.onSoundEvent?.(event);
+    if (this.callbacks.onSoundEvent && typeof window === 'undefined') {
+      return;
+    }
+    this.playSoundEventLocally(event);
+  }
+
+  private playSoundEventLocally(event: OnlineSoundEvent): void {
+    switch (event.type) {
+      case 'kick':
+        soundEngine.playKick(event.power);
+        break;
+      case 'whistle':
+        soundEngine.playWhistle(event.pattern);
+        break;
+      case 'post':
+        soundEngine.playPostHit();
+        break;
+      case 'goal':
+        soundEngine.playGoalCheer();
+        break;
+      case 'net':
+        soundEngine.playNetSwish();
+        break;
+      case 'tackle':
+        soundEngine.playTackle();
+        break;
+      case 'crowd':
+        soundEngine.playCrowdReaction(event.reaction);
+        break;
+    }
   }
 
   private createEmptyBall(): BallState {
@@ -163,6 +224,30 @@ export class MatchEngine {
     };
   }
 
+  private ensureControlledPlayers(): void {
+    const hasHomeControlled = this.players.some((p) => p.team === 'home' && p.isControlled);
+    if (!hasHomeControlled) {
+      const homeStriker =
+        this.players.find((p) => p.team === 'home' && p.role === 'ST') ??
+        this.players.find((p) => p.team === 'home' && p.role !== 'GK');
+      if (homeStriker) homeStriker.isControlled = true;
+    }
+
+    if (this.awayHumanControl) {
+      const hasAwayControlled = this.players.some((p) => p.team === 'away' && p.isControlled);
+      if (!hasAwayControlled) {
+        const awayStriker =
+          this.players.find((p) => p.team === 'away' && p.role === 'ST') ??
+          this.players.find((p) => p.team === 'away' && p.role !== 'GK');
+        if (awayStriker) awayStriker.isControlled = true;
+      }
+    } else {
+      for (const p of this.players) {
+        if (p.team === 'away') p.isControlled = false;
+      }
+    }
+  }
+
   public rebuildTeams(): void {
     const home = createTeamPlayers(this.homeTeam, 'home', this.homeFormation);
     const away = createTeamPlayers(this.awayTeam, 'away', this.awayFormation);
@@ -176,8 +261,12 @@ export class MatchEngine {
       appearance: { ...p.appearance },
     }));
     this.shotCharge = 0;
+    this.awayShotCharge = 0;
     this.setPiece = null;
     this.isReplaying = false;
+    this.netBallTarget = null;
+    this.netPlayerTargets.clear();
+    this.hasReceivedNetSnapshot = false;
     this.replayRecorder.clear();
     resetForKickoff(
       this.players,
@@ -186,6 +275,7 @@ export class MatchEngine {
       this.awayFormation,
       this.kickoffTeam,
     );
+    this.ensureControlledPlayers();
   }
 
   public startNewMatch(
@@ -196,6 +286,11 @@ export class MatchEngine {
     halfDurationSeconds: number,
     homeMentality: TacticalMentality = this.homeMentality,
     awayMentality: TacticalMentality = this.awayMentality,
+    options?: {
+      awayHumanControl?: boolean;
+      localSide?: TeamSide;
+      isOnlineClient?: boolean;
+    },
   ): void {
     this.homeTeam = homeTeam;
     this.awayTeam = awayTeam;
@@ -204,6 +299,9 @@ export class MatchEngine {
     this.homeMentality = homeMentality;
     this.awayMentality = awayMentality;
     this.halfDurationSeconds = halfDurationSeconds;
+    this.awayHumanControl = options?.awayHumanControl ?? false;
+    this.localSide = options?.localSide ?? 'home';
+    this.isOnlineClient = options?.isOnlineClient ?? false;
 
     this.half = 1;
     this.halfElapsedReal = 0;
@@ -220,14 +318,17 @@ export class MatchEngine {
     this.goalTotalElapsed = 0;
     this.halftimeTimer = 0;
     this.shotCharge = 0;
+    this.awayShotCharge = 0;
     this.stats = this.createEmptyStats();
     this.rebuildTeams();
-    soundEngine.playWhistle('short');
+    if (!this.isOnlineClient) {
+      this.emitSound({ type: 'whistle', pattern: 'short' });
+    }
     this.emitHudSnapshot();
   }
 
   public skipReplay(): void {
-    if (this.phase !== 'goal') return;
+    if (this.phase !== 'goal' || this.isOnlineClient) return;
     this.finishGoalCelebration();
   }
 
@@ -236,6 +337,7 @@ export class MatchEngine {
     this.isReplaying = false;
     this.phase = 'live';
     this.shotCharge = 0;
+    this.awayShotCharge = 0;
     this.replayRecorder.clear();
     resetForKickoff(
       this.players,
@@ -244,19 +346,224 @@ export class MatchEngine {
       this.awayFormation,
       this.kickoffTeam,
     );
-    soundEngine.playWhistle('short');
+    this.ensureControlledPlayers();
+    this.emitSound({ type: 'whistle', pattern: 'short' });
     this.emitHudSnapshot();
   }
 
-  public getControlledPlayer(): PlayerState | null {
-    return this.players.find((p) => p.isControlled) ?? null;
+  public getControlledPlayer(side: TeamSide = this.localSide): PlayerState | null {
+    return (
+      this.players.find((p) => p.team === side && p.isControlled) ??
+      this.players.find((p) => p.isControlled) ??
+      null
+    );
+  }
+
+  /**
+   * Produces a compact authoritative snapshot for server-to-client synchronization.
+   */
+  public getOnlineSnapshot(tick: number, events: OnlineSoundEvent[]): OnlineMatchSnapshot {
+    const compactPlayers: CompactPlayerNetState[] = this.players.map((p) => ({
+      id: p.id,
+      x: Math.round(p.position.x * 100) / 100,
+      y: Math.round(p.position.y * 100) / 100,
+      z: Math.round(p.position.z * 100) / 100,
+      vx: Math.round(p.velocity.x * 100) / 100,
+      vz: Math.round(p.velocity.z * 100) / 100,
+      facingAngle: Math.round(p.facingAngle * 1000) / 1000,
+      stamina: Math.round(p.stamina),
+      actionState: p.actionState,
+      diveDir: p.diveDir,
+      hasBall: p.hasBall,
+      isControlled: p.isControlled,
+      animPhase: Math.round(p.animPhase * 100) / 100,
+    }));
+
+    return {
+      tick,
+      serverTime: Date.now(),
+      phase: this.phase,
+      half: this.half,
+      matchMinutes: this.matchMinutes,
+      matchSeconds: this.matchSeconds,
+      isReplaying: this.isReplaying,
+      homeShotCharge: Math.round(this.shotCharge * 100) / 100,
+      awayShotCharge: Math.round(this.awayShotCharge * 100) / 100,
+      ball: {
+        position: {
+          x: Math.round(this.ball.position.x * 100) / 100,
+          y: Math.round(this.ball.position.y * 100) / 100,
+          z: Math.round(this.ball.position.z * 100) / 100,
+        },
+        velocity: {
+          x: Math.round(this.ball.velocity.x * 100) / 100,
+          y: Math.round(this.ball.velocity.y * 100) / 100,
+          z: Math.round(this.ball.velocity.z * 100) / 100,
+        },
+        spin: {
+          x: Math.round(this.ball.spin.x * 100) / 100,
+          y: Math.round(this.ball.spin.y * 100) / 100,
+          z: Math.round(this.ball.spin.z * 100) / 100,
+        },
+        ownerId: this.ball.ownerId,
+        lastTouchTeam: this.ball.lastTouchTeam,
+        lastTouchPlayerName: this.ball.lastTouchPlayerName,
+        pickupLockTimer: 0,
+      },
+      players: compactPlayers,
+      setPiece: this.setPiece ? { ...this.setPiece, spot: { ...this.setPiece.spot } } : null,
+      goalBanner: this.goalBanner ? { ...this.goalBanner } : null,
+      stats: { ...this.stats },
+      events,
+    };
+  }
+
+  /**
+   * Applies an authoritative server snapshot on an online client, setting up smooth interpolation.
+   */
+  public applyOnlineSnapshot(snapshot: OnlineMatchSnapshot, localSide: TeamSide): void {
+    this.isOnlineClient = true;
+    this.awayHumanControl = true;
+    this.localSide = localSide;
+
+    const prevPhase = this.phase;
+    this.phase = snapshot.phase;
+    this.half = snapshot.half;
+    this.matchMinutes = snapshot.matchMinutes;
+    this.matchSeconds = snapshot.matchSeconds;
+    this.isReplaying = snapshot.isReplaying;
+    this.shotCharge = snapshot.homeShotCharge;
+    this.awayShotCharge = snapshot.awayShotCharge;
+    this.setPiece = snapshot.setPiece;
+    this.goalBanner = snapshot.goalBanner;
+    this.stats = { ...snapshot.stats };
+
+    const ballJump = Math.hypot(
+      snapshot.ball.position.x - this.ball.position.x,
+      snapshot.ball.position.z - this.ball.position.z,
+    );
+    const snapImmediate =
+      !this.hasReceivedNetSnapshot ||
+      ballJump > 12 ||
+      (prevPhase !== snapshot.phase && (snapshot.phase === 'live' || snapshot.phase === 'setpiece'));
+
+    this.ball.ownerId = snapshot.ball.ownerId;
+    this.ball.lastTouchTeam = snapshot.ball.lastTouchTeam;
+    this.ball.lastTouchPlayerName = snapshot.ball.lastTouchPlayerName;
+    this.ball.spin = { ...snapshot.ball.spin };
+    this.ball.velocity = { ...snapshot.ball.velocity };
+    this.netBallTarget = {
+      x: snapshot.ball.position.x,
+      y: snapshot.ball.position.y,
+      z: snapshot.ball.position.z,
+      vx: snapshot.ball.velocity.x,
+      vy: snapshot.ball.velocity.y,
+      vz: snapshot.ball.velocity.z,
+    };
+    if (snapImmediate) {
+      this.ball.position = { ...snapshot.ball.position };
+    }
+
+    const byId = new Map<string, CompactPlayerNetState>();
+    for (const np of snapshot.players) {
+      byId.set(np.id, np);
+    }
+
+    for (const p of this.players) {
+      const np = byId.get(p.id);
+      if (!np) continue;
+      p.stamina = np.stamina;
+      p.actionState = np.actionState;
+      p.diveDir = np.diveDir;
+      p.hasBall = np.hasBall;
+      p.isControlled = np.isControlled;
+      p.velocity.x = np.vx;
+      p.velocity.z = np.vz;
+      p.animPhase = np.animPhase;
+
+      const distJump = Math.hypot(np.x - p.position.x, np.z - p.position.z);
+      this.netPlayerTargets.set(p.id, {
+        x: np.x,
+        y: np.y,
+        z: np.z,
+        vx: np.vx,
+        vz: np.vz,
+        facingAngle: np.facingAngle,
+      });
+
+      if (snapImmediate || distJump > 9) {
+        p.position.x = np.x;
+        p.position.y = np.y;
+        p.position.z = np.z;
+        p.facingAngle = np.facingAngle;
+      }
+    }
+
+    this.hasReceivedNetSnapshot = true;
+
+    for (const ev of snapshot.events) {
+      this.playSoundEventLocally(ev);
+      if (ev.type === 'post') {
+        this.callbacks.onCameraTrauma(0.45);
+      } else if (ev.type === 'goal') {
+        this.callbacks.onCameraTrauma(0.55);
+      }
+    }
+
+    soundEngine.updateCrowdIntensity(
+      computeCrowdIntensity({
+        shellState: this.shellState,
+        phase: this.phase,
+        ballX: this.ball.position.x,
+        ballSpeed: Math.hypot(this.ball.velocity.x, this.ball.velocity.z),
+        isReplaying: this.isReplaying,
+        isOnline: true,
+      }),
+    );
+
+    if (snapshot.phase === 'fulltime') {
+      this.shellState = 'gameover';
+    }
+
+    this.emitHudSnapshot();
+  }
+
+  /**
+   * Smoothly interpolates ball and remote players between server snapshots at 60 FPS.
+   */
+  public stepOnlineInterpolation(rawDt: number): void {
+    const dt = Math.min(rawDt, 0.05);
+    const ballAlpha = Math.min(1, 18 * dt);
+    const playerAlpha = Math.min(1, 15 * dt);
+
+    if (this.netBallTarget) {
+      // Gentle velocity lead compensation for smoother fast shots/passes
+      this.netBallTarget.x += this.netBallTarget.vx * dt * 0.35;
+      this.netBallTarget.z += this.netBallTarget.vz * dt * 0.35;
+      this.ball.position.x += (this.netBallTarget.x - this.ball.position.x) * ballAlpha;
+      this.ball.position.y += (this.netBallTarget.y - this.ball.position.y) * ballAlpha;
+      this.ball.position.z += (this.netBallTarget.z - this.ball.position.z) * ballAlpha;
+    }
+
+    for (const p of this.players) {
+      const target = this.netPlayerTargets.get(p.id);
+      if (!target) continue;
+      target.x += target.vx * dt * 0.25;
+      target.z += target.vz * dt * 0.25;
+      p.position.x += (target.x - p.position.x) * playerAlpha;
+      p.position.y += (target.y - p.position.y) * playerAlpha;
+      p.position.z += (target.z - p.position.z) * playerAlpha;
+      p.facingAngle = lerpAngle(p.facingAngle, target.facingAngle, Math.min(1, 16 * dt));
+      const speed = Math.hypot(p.velocity.x, p.velocity.z);
+      p.animPhase += speed * dt * 2.2;
+    }
   }
 
   /**
    * Returns live state or interpolated slow-motion replay proxies for 3D scene rendering.
    */
   public getVisualState(): { ball: BallState; players: PlayerState[] } {
-    if (!this.isReplaying || this.replayRecorder.getClipLength() === 0) {
+    if (this.isOnlineClient || !this.isReplaying || this.replayRecorder.getClipLength() === 0) {
       return { ball: this.ball, players: this.players };
     }
 
@@ -264,7 +571,6 @@ export class MatchEngine {
       0,
       Math.min(1, (this.goalTotalElapsed - GOAL_IMPACT_DURATION) / GOAL_REPLAY_DURATION),
     );
-    // Focus on the final 70% of the recorded buffer for dramatic slow-motion goal buildup & finish
     const clipSample = this.replayRecorder.sampleAtProgress(0.3 + replayProgress * 0.7);
     if (!clipSample) {
       return { ball: this.ball, players: this.players };
@@ -297,8 +603,13 @@ export class MatchEngine {
     return { ball: this.replayBallProxy, players: this.replayPlayerProxies };
   }
 
-  public step(rawDt: number, input: InputSnapshot): void {
+  public step(rawDt: number, input: InputSnapshot, awayInput?: InputSnapshot): void {
     if (this.shellState !== 'playing') {
+      return;
+    }
+
+    if (this.isOnlineClient) {
+      this.stepOnlineInterpolation(rawDt);
       return;
     }
 
@@ -315,6 +626,7 @@ export class MatchEngine {
       this.goalCelebrationTimer -= dt;
 
       const shouldReplay =
+        !this.awayHumanControl &&
         this.goalTotalElapsed >= GOAL_IMPACT_DURATION &&
         this.replayRecorder.getClipLength() > 4;
 
@@ -345,6 +657,7 @@ export class MatchEngine {
         this.phase = 'live';
         this.kickoffTeam = 'away';
         this.shotCharge = 0;
+        this.awayShotCharge = 0;
         this.setPiece = null;
         this.replayRecorder.clear();
         resetForKickoff(
@@ -354,7 +667,8 @@ export class MatchEngine {
           this.awayFormation,
           'away',
         );
-        soundEngine.playWhistle('short');
+        this.ensureControlledPlayers();
+        this.emitSound({ type: 'whistle', pattern: 'short' });
         this.emitHudSnapshot();
       }
       return;
@@ -378,8 +692,9 @@ export class MatchEngine {
       this.phase = 'halftime';
       this.halftimeTimer = 2.6;
       this.shotCharge = 0;
+      this.awayShotCharge = 0;
       this.setPiece = null;
-      soundEngine.playWhistle('double');
+      this.emitSound({ type: 'whistle', pattern: 'double' });
       this.emitHudSnapshot();
       return;
     }
@@ -388,20 +703,21 @@ export class MatchEngine {
       this.phase = 'fulltime';
       this.shellState = 'gameover';
       this.shotCharge = 0;
+      this.awayShotCharge = 0;
       this.setPiece = null;
-      soundEngine.playWhistle('long');
+      this.emitSound({ type: 'whistle', pattern: 'long' });
       this.callbacks.onMatchFinished({ ...this.stats });
       this.emitHudSnapshot();
       return;
     }
 
     if (this.phase === 'setpiece' && this.setPiece) {
-      this.stepSetPiecePhase(dt, input);
+      this.stepSetPiecePhase(dt, input, awayInput);
       return;
     }
 
     if (input.switchPressed) {
-      const current = this.getControlledPlayer();
+      const current = this.getControlledPlayer('home');
       const target = selectSwitchTarget(
         this.players,
         this.ball,
@@ -412,6 +728,21 @@ export class MatchEngine {
         if (current) current.isControlled = false;
         target.isControlled = true;
         this.shotCharge = 0;
+      }
+    }
+
+    if (this.awayHumanControl && awayInput?.switchPressed) {
+      const currentAway = this.getControlledPlayer('away');
+      const targetAway = selectSwitchTarget(
+        this.players,
+        this.ball,
+        'away',
+        currentAway?.id ?? null,
+      );
+      if (targetAway) {
+        if (currentAway) currentAway.isControlled = false;
+        targetAway.isControlled = true;
+        this.awayShotCharge = 0;
       }
     }
 
@@ -434,8 +765,10 @@ export class MatchEngine {
       if (p.diveCooldown > 0) p.diveCooldown = Math.max(0, p.diveCooldown - dt);
       if (p.gkHoldTimer > 0) p.gkHoldTimer = Math.max(0, p.gkHoldTimer - dt);
 
-      if (p.isControlled) {
+      if (p.isControlled && p.team === 'home') {
         this.stepControlledPlayer(p, input, dt);
+      } else if (p.isControlled && p.team === 'away' && this.awayHumanControl && awayInput) {
+        this.stepControlledPlayer(p, awayInput, dt);
       } else {
         const formation = p.team === 'home' ? this.homeFormation : this.awayFormation;
         const mentality = p.team === 'home' ? this.homeMentality : this.awayMentality;
@@ -463,6 +796,7 @@ export class MatchEngine {
       if (!owner) {
         this.ball.ownerId = null;
         this.shotCharge = 0;
+        this.awayShotCharge = 0;
       } else {
         if (owner.team === 'home') this.stats.homePossessionSeconds += dt;
         else this.stats.awayPossessionSeconds += dt;
@@ -487,10 +821,11 @@ export class MatchEngine {
       }
     } else {
       this.shotCharge = 0;
+      this.awayShotCharge = 0;
       const ballResult = stepBallPhysics(this.ball, dt);
       if (ballResult.hitPost) {
-        soundEngine.playPostHit();
-        soundEngine.playCrowdReaction('ooh');
+        this.emitSound({ type: 'post' });
+        this.emitSound({ type: 'crowd', reaction: 'ooh' });
         this.callbacks.onCameraTrauma(0.45);
       }
 
@@ -508,10 +843,12 @@ export class MatchEngine {
       this.tryPickupLooseBall();
     }
 
-    this.replayRecorder.record(this.ball, this.players, dt);
+    if (!this.awayHumanControl) {
+      this.replayRecorder.record(this.ball, this.players, dt);
+    }
 
     this.hudEmitAccumulator += dt;
-    const hudInterval = this.shotCharge > 0 ? 0.04 : 0.1;
+    const hudInterval = this.shotCharge > 0 || this.awayShotCharge > 0 ? 0.04 : 0.1;
     if (this.hudEmitAccumulator >= hudInterval) {
       this.hudEmitAccumulator = 0;
       soundEngine.updateCrowdIntensity(
@@ -528,7 +865,11 @@ export class MatchEngine {
     }
   }
 
-  private stepSetPiecePhase(dt: number, input: InputSnapshot): void {
+  private stepSetPiecePhase(
+    dt: number,
+    homeInput: InputSnapshot,
+    awayInput?: InputSnapshot,
+  ): void {
     const sp = this.setPiece;
     if (!sp) {
       this.phase = 'live';
@@ -536,41 +877,93 @@ export class MatchEngine {
     }
 
     const taker = sp.takerId ? this.players.find((p) => p.id === sp.takerId) ?? null : null;
+    const isHumanTaker =
+      sp.team === 'home' || (sp.team === 'away' && this.awayHumanControl && Boolean(awayInput));
+    const takerInput = sp.team === 'home' ? homeInput : awayInput ?? homeInput;
+    const defendingInput = sp.team === 'home' ? awayInput : homeInput;
+    const attackGoalX = sp.team === 'home' ? HALF_LENGTH : -HALF_LENGTH;
 
-    if (sp.team === 'home' && taker) {
-      // User controls the set-piece taker: rotate aim with directional input, charge or pass/lob/shoot
-      const moveMag = Math.hypot(input.moveX, input.moveZ);
+    // Allow defending human GK to move & dive during penalties
+    if (sp.type === 'penalty' && defendingInput && (sp.team === 'away' || this.awayHumanControl)) {
+      const defTeam: TeamSide = sp.team === 'home' ? 'away' : 'home';
+      const defGk = this.players.find((p) => p.team === defTeam && p.role === 'GK');
+      if (defGk) {
+        if (defGk.diveCooldown > 0) defGk.diveCooldown = Math.max(0, defGk.diveCooldown - dt);
+        if (defGk.actionTimer > 0) {
+          defGk.actionTimer = Math.max(0, defGk.actionTimer - dt);
+          if (defGk.actionTimer === 0 && defGk.actionState === 'dive') {
+            defGk.actionState = 'idle';
+            defGk.diveDir = 0;
+          }
+        }
+        if ((defendingInput.tacklePressed || defendingInput.shootPressed) && defGk.diveCooldown <= 0) {
+          const diveSign: -1 | 1 = defendingInput.moveZ >= 0 ? 1 : -1;
+          defGk.actionState = 'dive';
+          defGk.actionTimer = 0.55;
+          defGk.diveCooldown = 1.1;
+          defGk.diveDir = diveSign;
+          defGk.velocity.z = diveSign * 7.8;
+        } else if (defGk.actionState !== 'dive') {
+          defGk.position.z = Math.max(
+            -GOAL_HALF_WIDTH + 0.4,
+            Math.min(GOAL_HALF_WIDTH - 0.4, defGk.position.z + defendingInput.moveZ * 4.5 * dt),
+          );
+        } else {
+          defGk.position.z += defGk.velocity.z * dt;
+          defGk.velocity.z *= Math.pow(0.92, dt * 60);
+        }
+      }
+    }
+
+    if (isHumanTaker && taker) {
+      const moveMag = Math.hypot(takerInput.moveX, takerInput.moveZ);
       if (moveMag > 0.12) {
-        const targetAngle = Math.atan2(input.moveX, input.moveZ);
+        const targetAngle = Math.atan2(takerInput.moveX, takerInput.moveZ);
         taker.facingAngle = lerpAngle(taker.facingAngle, targetAngle, Math.min(1, 10 * dt));
       }
 
-      if (input.shootHeld && !input.shootPressed) {
-        this.shotCharge = Math.min(1, this.shotCharge + 1.45 * dt);
+      if (takerInput.shootHeld && !takerInput.shootPressed) {
+        if (sp.team === 'home') {
+          this.shotCharge = Math.min(1, this.shotCharge + 1.45 * dt);
+        } else {
+          this.awayShotCharge = Math.min(1, this.awayShotCharge + 1.45 * dt);
+        }
       }
 
-      if (input.shootReleased || input.shootPressed || input.passPressed || input.lobPressed) {
-        const charge = this.shotCharge > 0.03 ? this.shotCharge : 0.55;
-        this.shotCharge = 0;
+      if (
+        takerInput.shootReleased ||
+        takerInput.shootPressed ||
+        takerInput.passPressed ||
+        takerInput.lobPressed
+      ) {
+        const rawCharge = sp.team === 'home' ? this.shotCharge : this.awayShotCharge;
+        const charge = rawCharge > 0.03 ? rawCharge : 0.55;
+        if (sp.team === 'home') this.shotCharge = 0;
+        else this.awayShotCharge = 0;
 
         if (sp.type === 'penalty') {
-          const aimZ = Math.abs(input.moveZ) > 0.1 ? input.moveZ * (GOAL_HALF_WIDTH * 0.88) : 0;
+          const aimZ =
+            Math.abs(takerInput.moveZ) > 0.1 ? takerInput.moveZ * (GOAL_HALF_WIDTH * 0.88) : 0;
           const profile = computeShotProfile(taker.attributes.shotPower, charge, false);
           applyBallKick(
             this.ball,
-            HALF_LENGTH - sp.spot.x,
+            attackGoalX - sp.spot.x,
             aimZ - sp.spot.z,
             profile.horizontalSpeed * 1.05,
             2.4 + charge * 2.2,
             taker,
             Math.sign(aimZ) * 1.1,
           );
-          this.stats.homeShots += 1;
-          soundEngine.playKick(1.2);
-        } else if ((sp.type === 'free_kick' || sp.type === 'corner') && (input.shootReleased || input.shootPressed)) {
+          if (sp.team === 'home') this.stats.homeShots += 1;
+          else this.stats.awayShots += 1;
+          this.emitSound({ type: 'kick', power: 1.2 });
+        } else if (
+          (sp.type === 'free_kick' || sp.type === 'corner') &&
+          (takerInput.shootReleased || takerInput.shootPressed)
+        ) {
           if (sp.type === 'corner') {
-            const boxX = HALF_LENGTH - 9.5;
-            const aimZ = Math.abs(input.moveZ) > 0.1 ? input.moveZ * 5 : 0;
+            const boxX = sp.team === 'home' ? HALF_LENGTH - 9.5 : -HALF_LENGTH + 9.5;
+            const aimZ = Math.abs(takerInput.moveZ) > 0.1 ? takerInput.moveZ * 5 : 0;
             applyBallKick(
               this.ball,
               boxX - sp.spot.x,
@@ -580,26 +973,28 @@ export class MatchEngine {
               taker,
               Math.sign(sp.spot.z || 1) * 1.6,
             );
-            this.stats.homePasses += 1;
+            if (sp.team === 'home') this.stats.homePasses += 1;
+            else this.stats.awayPasses += 1;
           } else {
-            const aimZ = Math.abs(input.moveZ) > 0.1 ? input.moveZ * 3.4 : 0;
+            const aimZ = Math.abs(takerInput.moveZ) > 0.1 ? takerInput.moveZ * 3.4 : 0;
             const profile = computeShotProfile(taker.attributes.shotPower, charge, false);
             applyBallKick(
               this.ball,
-              HALF_LENGTH - sp.spot.x,
+              attackGoalX - sp.spot.x,
               aimZ - sp.spot.z,
               profile.horizontalSpeed,
               4.4 + charge * 2.5,
               taker,
-              Math.sign(input.moveZ || 1) * 1.8,
+              Math.sign(takerInput.moveZ || 1) * 1.8,
             );
-            this.stats.homeShots += 1;
+            if (sp.team === 'home') this.stats.homeShots += 1;
+            else this.stats.awayShots += 1;
           }
-          soundEngine.playKick(1.15);
+          this.emitSound({ type: 'kick', power: 1.15 });
         } else {
-          const isLob = input.lobPressed || sp.type === 'corner' || sp.type === 'goal_kick';
-          const aimX = moveMag > 0.12 ? input.moveX : Math.sin(taker.facingAngle);
-          const aimZ = moveMag > 0.12 ? input.moveZ : Math.cos(taker.facingAngle);
+          const isLob = takerInput.lobPressed || sp.type === 'corner' || sp.type === 'goal_kick';
+          const aimX = moveMag > 0.12 ? takerInput.moveX : Math.sin(taker.facingAngle);
+          const aimZ = moveMag > 0.12 ? takerInput.moveZ : Math.cos(taker.facingAngle);
           const target = findBestPassTarget(taker, this.players, aimX, aimZ);
 
           if (target) {
@@ -619,8 +1014,9 @@ export class MatchEngine {
               taker,
             );
           }
-          this.stats.homePasses += 1;
-          soundEngine.playKick(0.95);
+          if (sp.team === 'home') this.stats.homePasses += 1;
+          else this.stats.awayPasses += 1;
+          this.emitSound({ type: 'kick', power: 0.95 });
         }
 
         this.phase = 'live';
@@ -629,37 +1025,6 @@ export class MatchEngine {
         return;
       }
     } else {
-      // Away takes set piece after short tactical pause; allow user GK movement/dive on penalty!
-      if (sp.type === 'penalty') {
-        const homeGk = this.players.find((p) => p.team === 'home' && p.role === 'GK');
-        if (homeGk) {
-          if (homeGk.diveCooldown > 0) homeGk.diveCooldown = Math.max(0, homeGk.diveCooldown - dt);
-          if (homeGk.actionTimer > 0) {
-            homeGk.actionTimer = Math.max(0, homeGk.actionTimer - dt);
-            if (homeGk.actionTimer === 0 && homeGk.actionState === 'dive') {
-              homeGk.actionState = 'idle';
-              homeGk.diveDir = 0;
-            }
-          }
-          if ((input.tacklePressed || input.shootPressed) && homeGk.diveCooldown <= 0) {
-            const diveSign: -1 | 1 = input.moveZ >= 0 ? 1 : -1;
-            homeGk.actionState = 'dive';
-            homeGk.actionTimer = 0.55;
-            homeGk.diveCooldown = 1.1;
-            homeGk.diveDir = diveSign;
-            homeGk.velocity.z = diveSign * 7.8;
-          } else if (homeGk.actionState !== 'dive') {
-            homeGk.position.z = Math.max(
-              -GOAL_HALF_WIDTH + 0.4,
-              Math.min(GOAL_HALF_WIDTH - 0.4, homeGk.position.z + input.moveZ * 4.5 * dt),
-            );
-          } else {
-            homeGk.position.z += homeGk.velocity.z * dt;
-            homeGk.velocity.z *= Math.pow(0.92, dt * 60);
-          }
-        }
-      }
-
       sp.timer -= dt;
       if (sp.timer <= 0 && taker) {
         const decision = computeSetPieceAiDecision(taker, sp.type, this.ball, this.players);
@@ -674,7 +1039,7 @@ export class MatchEngine {
         );
         if (decision.isShot) this.stats.awayShots += 1;
         else this.stats.awayPasses += 1;
-        soundEngine.playKick(decision.isShot ? 1.15 : 0.9);
+        this.emitSound({ type: 'kick', power: decision.isShot ? 1.15 : 0.9 });
         this.phase = 'live';
         this.setPiece = null;
         this.emitHudSnapshot();
@@ -692,6 +1057,7 @@ export class MatchEngine {
   private stepControlledPlayer(p: PlayerState, input: InputSnapshot, dt: number): void {
     const moveMag = Math.hypot(input.moveX, input.moveZ);
     const wantsSprint = input.sprint && p.stamina > 8 && moveMag > 0.15;
+    const isHome = p.team === 'home';
 
     if (wantsSprint) {
       p.stamina = Math.max(0, p.stamina - 22 * dt);
@@ -708,7 +1074,7 @@ export class MatchEngine {
       p.actionState = 'tackle';
       p.actionTimer = 0.34;
       p.tackleCooldown = 0.85;
-      soundEngine.playTackle();
+      this.emitSound({ type: 'tackle' });
       this.attemptTackleSteal(p);
       if (this.phase === 'setpiece') return;
     }
@@ -749,14 +1115,18 @@ export class MatchEngine {
 
     if (p.hasBall) {
       if (input.shootHeld && !input.shootPressed) {
-        this.shotCharge = Math.min(1, this.shotCharge + 1.55 * dt);
+        if (isHome) this.shotCharge = Math.min(1, this.shotCharge + 1.55 * dt);
+        else this.awayShotCharge = Math.min(1, this.awayShotCharge + 1.55 * dt);
       }
 
       if (input.shootReleased || input.shootPressed) {
-        const charge = this.shotCharge > 0.03 ? this.shotCharge : 0.35;
-        this.shotCharge = 0;
+        const rawCharge = isHome ? this.shotCharge : this.awayShotCharge;
+        const charge = rawCharge > 0.03 ? rawCharge : 0.35;
+        if (isHome) this.shotCharge = 0;
+        else this.awayShotCharge = 0;
 
-        const goalDirX = HALF_LENGTH - p.position.x;
+        const targetGoalX = isHome ? HALF_LENGTH : -HALF_LENGTH;
+        const goalDirX = targetGoalX - p.position.x;
         const aimZ = Math.abs(input.moveZ) > 0.12 ? input.moveZ * 3.4 : 0;
         const goalDirZ = aimZ - p.position.z;
         const profile = computeShotProfile(p.attributes.shotPower, charge, wantsSprint);
@@ -771,16 +1141,18 @@ export class MatchEngine {
           p,
           sideSpin,
         );
-        this.stats.homeShots += 1;
+        if (isHome) this.stats.homeShots += 1;
+        else this.stats.awayShots += 1;
         this.hitstopTimer = 0.035;
         this.callbacks.onCameraTrauma(0.18 + charge * 0.2);
-        soundEngine.playKick(1.05 + charge * 0.35);
+        this.emitSound({ type: 'kick', power: 1.05 + charge * 0.35 });
         this.emitHudSnapshot();
         return;
       }
 
       if (input.passPressed || input.lobPressed) {
-        this.shotCharge = 0;
+        if (isHome) this.shotCharge = 0;
+        else this.awayShotCharge = 0;
         const isLob = input.lobPressed;
         const target = findBestPassTarget(p, this.players, input.moveX, input.moveZ);
         let dirX = moveMag > 0.15 ? input.moveX : Math.sin(p.facingAngle);
@@ -799,8 +1171,9 @@ export class MatchEngine {
         }
 
         applyBallKick(this.ball, dirX, dirZ, passSpeed, loft, p);
-        this.stats.homePasses += 1;
-        soundEngine.playKick(isLob ? 1.0 : 0.72);
+        if (isHome) this.stats.homePasses += 1;
+        else this.stats.awayPasses += 1;
+        this.emitSound({ type: 'kick', power: isLob ? 1.0 : 0.72 });
 
         if (target && target.role !== 'GK') {
           p.isControlled = false;
@@ -808,7 +1181,8 @@ export class MatchEngine {
         }
       }
     } else {
-      this.shotCharge = 0;
+      if (isHome) this.shotCharge = 0;
+      else this.awayShotCharge = 0;
     }
   }
 
@@ -910,7 +1284,7 @@ export class MatchEngine {
         else this.stats.awayPasses += 1;
       }
       executeAiBallAction(p, this.ball, steering, this.players, (kind) => {
-        soundEngine.playKick(kind === 'kick' ? 1.15 : 0.72);
+        this.emitSound({ type: 'kick', power: kind === 'kick' ? 1.15 : 0.72 });
       });
     }
   }
@@ -943,13 +1317,14 @@ export class MatchEngine {
       owner.hasBall = false;
       owner.kickCooldown = 0.5;
       this.claimBall(tackler);
-      soundEngine.playKick(0.8);
+      this.emitSound({ type: 'kick', power: 0.8 });
     }
   }
 
   private triggerSetPiece(type: SetPieceType, restartTeam: TeamSide, spot: Vec3): void {
     const setup = computeSetPieceSetup(type, spot, restartTeam, this.players, this.ball);
     this.shotCharge = 0;
+    this.awayShotCharge = 0;
     this.phase = 'setpiece';
     this.setPiece = {
       type,
@@ -958,11 +1333,14 @@ export class MatchEngine {
       takerId: setup.takerId,
       timer: type === 'penalty' ? 1.45 : 1.15,
     };
-    soundEngine.playWhistle(type === 'penalty' || type === 'free_kick' ? 'double' : 'short');
+    this.emitSound({
+      type: 'whistle',
+      pattern: type === 'penalty' || type === 'free_kick' ? 'double' : 'short',
+    });
     if (type === 'penalty' || type === 'free_kick') {
-      soundEngine.playCrowdReaction('boo');
+      this.emitSound({ type: 'crowd', reaction: 'boo' });
     } else if (type === 'corner') {
-      soundEngine.playCrowdReaction('applause');
+      this.emitSound({ type: 'crowd', reaction: 'applause' });
     }
     this.emitHudSnapshot();
   }
@@ -979,8 +1357,8 @@ export class MatchEngine {
         if (p.team === 'home') this.stats.homeSaves += 1;
         else this.stats.awaySaves += 1;
         this.callbacks.onCameraTrauma(0.25);
-        soundEngine.playKick(1.1);
-        soundEngine.playCrowdReaction('ooh');
+        this.emitSound({ type: 'kick', power: 1.1 });
+        this.emitSound({ type: 'crowd', reaction: 'ooh' });
         this.emitHudSnapshot();
         return;
       }
@@ -988,11 +1366,11 @@ export class MatchEngine {
         if (wasOpponentShot && incomingSpeed > 9.5) {
           if (p.team === 'home') this.stats.homeSaves += 1;
           else this.stats.awaySaves += 1;
-          soundEngine.playCrowdReaction('applause');
+          this.emitSound({ type: 'crowd', reaction: 'applause' });
         }
         p.gkHoldTimer = 0.55;
         this.claimBall(p);
-        soundEngine.playKick(0.55);
+        this.emitSound({ type: 'kick', power: 0.55 });
         this.emitHudSnapshot();
         return;
       }
@@ -1033,6 +1411,16 @@ export class MatchEngine {
       for (const p of this.players) {
         if (p.team === 'home') p.isControlled = p.id === player.id;
       }
+    } else if (
+      player.team === 'away' &&
+      this.awayHumanControl &&
+      player.role !== 'GK' &&
+      !player.isControlled
+    ) {
+      this.awayShotCharge = 0;
+      for (const p of this.players) {
+        if (p.team === 'away') p.isControlled = p.id === player.id;
+      }
     }
   }
 
@@ -1060,7 +1448,6 @@ export class MatchEngine {
       minute: Math.max(1, this.matchMinutes),
     };
 
-    // Trigger goal celebration animation on the scorer & nearby teammates
     for (const p of this.players) {
       if (p.team === scoringTeam && p.role !== 'GK') {
         const distToBall = Math.hypot(
@@ -1076,19 +1463,24 @@ export class MatchEngine {
       }
     }
 
-    this.replayRecorder.freezeClip();
+    if (!this.awayHumanControl) {
+      this.replayRecorder.freezeClip();
+    }
     this.phase = 'goal';
     this.isReplaying = false;
     this.goalTotalElapsed = 0;
     this.kickoffTeam = scoringTeam === 'home' ? 'away' : 'home';
-    this.goalCelebrationTimer = GOAL_IMPACT_DURATION + GOAL_REPLAY_DURATION;
+    this.goalCelebrationTimer = this.awayHumanControl
+      ? 2.2
+      : GOAL_IMPACT_DURATION + GOAL_REPLAY_DURATION;
     this.hitstopTimer = 0.06;
     this.shotCharge = 0;
+    this.awayShotCharge = 0;
     this.setPiece = null;
     this.callbacks.onCameraTrauma(0.55);
-    soundEngine.playNetSwish();
-    soundEngine.playWhistle('short');
-    soundEngine.playGoalCheer();
+    this.emitSound({ type: 'net' });
+    this.emitSound({ type: 'whistle', pattern: 'short' });
+    this.emitSound({ type: 'goal' });
     this.emitHudSnapshot();
   }
 
@@ -1113,26 +1505,27 @@ export class MatchEngine {
   }
 
   public emitHudSnapshot(): void {
-    const controlled = this.getControlledPlayer() ?? this.players[9];
+    const controlled = this.getControlledPlayer(this.localSide) ?? this.players[9];
+    const localCharge = this.getShotCharge(this.localSide);
     const radarPlayers = this.players.map((p) => ({
       x: p.position.x / HALF_LENGTH,
       z: p.position.z / 34,
       team: p.team,
-      isControlled: p.isControlled,
+      isControlled: p.team === this.localSide && p.isControlled,
     }));
 
     let setPieceBanner: MatchHudSnapshot['setPieceBanner'] = null;
     if (this.phase === 'setpiece' && this.setPiece) {
       const sp = this.setPiece;
       const teamName = sp.team === 'home' ? this.homeTeam.shortName : this.awayTeam.shortName;
-      let hint = 'Defending Set Piece';
-      if (sp.team === 'home') {
+      let hint = 'Défense sur coup de pied arrêté';
+      if (sp.team === this.localSide) {
         hint =
           sp.type === 'penalty'
-            ? 'Aim corner + Hold/Release SHOOT'
-            : 'Aim + PASS / LOB / SHOOT';
+            ? 'Visez un angle + Maintenez/Relâchez TIR'
+            : 'Visez + PASSE / LOB / TIR';
       } else if (sp.type === 'penalty') {
-        hint = 'Aim GK + TACKLE / SHOOT to Dive';
+        hint = 'Déplacez le gardien + TACLE / TIR pour plonger';
       }
       setPieceBanner = {
         type: sp.type,
@@ -1154,14 +1547,17 @@ export class MatchEngine {
       awayShort: this.awayTeam.shortName,
       homeColor: this.homeTeam.kit.primary,
       awayColor: this.awayTeam.kit.primary,
-      homeFormation: this.homeFormation,
-      homeMentality: this.homeMentality,
+      homeFormation: this.localSide === 'away' ? this.awayFormation : this.homeFormation,
+      homeMentality: this.localSide === 'away' ? this.awayMentality : this.homeMentality,
       controlledPlayerName: controlled?.name ?? 'Player',
       controlledPlayerNumber: controlled?.number ?? 9,
       controlledPlayerRole: controlled?.role ?? 'ST',
       controlledStamina: Math.round(controlled?.stamina ?? 100),
       controlledHasBall: controlled?.hasBall ?? false,
-      controlledShotCharge: controlled?.hasBall || (this.phase === 'setpiece' && this.setPiece?.team === 'home') ? this.shotCharge : 0,
+      controlledShotCharge:
+        controlled?.hasBall || (this.phase === 'setpiece' && this.setPiece?.team === this.localSide)
+          ? localCharge
+          : 0,
       cameraMode: this.cameraMode,
       isReplaying: this.isReplaying,
       setPieceBanner,

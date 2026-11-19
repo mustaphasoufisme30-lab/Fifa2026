@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { User } from 'firebase/auth';
 import { computeCrowdIntensity } from './audio/crowdLogic';
 import { soundEngine } from './audio/soundEngine';
 import { InputManager } from './controls/inputManager';
@@ -10,13 +11,32 @@ import {
   FormationId,
   GameSettings,
   GameShellState,
+  InputSnapshot,
   MatchHudSnapshot,
   MatchStats,
   SavedState,
   TacticalMentality,
   TeamConfig,
+  TeamSide,
   TournamentMatch,
 } from './core/types';
+import {
+  signInWithGoogle,
+  signOutPlayer,
+  subscribeAuthState,
+} from './firebase/firebase';
+import {
+  createFirestoreRoom,
+  deleteWaitingFirestoreRoom,
+  ensurePlayerProfile,
+  joinFirestoreRoom,
+  markFirestoreRoomFinished,
+  markFirestoreRoomPlaying,
+  recordOnlinePlayerMatchStats,
+  sanitizeDisplayName,
+  sanitizeRoomCode,
+  updateFirestoreRoomLobby,
+} from './firebase/roomService';
 import { MatchEngine } from './game/matchEngine';
 import {
   createTournament,
@@ -24,18 +44,27 @@ import {
   recordUserTournamentMatchResult,
   simulateUserTournamentMatch,
 } from './game/tournament';
+import {
+  OnlineMultiplayerClient,
+  OnlineSocketStatus,
+} from './multiplayer/onlineClient';
+import { OnlineRoomSnapshot, ServerToClientMessage } from './multiplayer/protocol';
 import { applyCustomPlayerToTeam } from './players/customPlayer';
+import { pickRandomRobotTeam, resolveUserVsRobotPairing } from './teams/matchup';
 import { getTeamById, TEAMS } from './teams/teams';
 import { MatchHud } from './ui/MatchHud';
 import {
   FullTimeModal,
+  OnlineMatchSummary,
   PauseModal,
   TitleSettingsDrawer,
   TournamentMatchSummary,
 } from './ui/Modals';
 import { OfflineGateModal } from './ui/OfflineGateModal';
+import { OnlineScreen } from './ui/OnlineScreen';
 import { PitchScene } from './ui/PitchScene';
 import { PlayerStudioModal } from './ui/PlayerStudioModal';
+import { TeamMatchupModal } from './ui/TeamMatchupModal';
 import { TitlePanel, TitleScreen } from './ui/TitleScreen';
 import { TournamentScreen } from './ui/TournamentScreen';
 
@@ -60,11 +89,39 @@ export default function App() {
   );
   const [checkingNetwork, setCheckingNetwork] = useState(false);
 
+  // Online 1v1 Multiplayer & Firebase Auth State
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [onlineNickname, setOnlineNickname] = useState('Joueur');
+  const [onlineTeamId, setOnlineTeamId] = useState(() => loadSavedState().homeTeamId);
+  const [onlineFormation, setOnlineFormation] = useState<FormationId>(
+    () => loadSavedState().homeFormation,
+  );
+  const [socketStatus, setSocketStatus] = useState<OnlineSocketStatus>('disconnected');
+  const [onlineRoom, setOnlineRoom] = useState<OnlineRoomSnapshot | null>(null);
+  const [onlineSide, setOnlineSide] = useState<TeamSide | null>(null);
+  const [onlineError, setOnlineError] = useState<string | null>(null);
+  const [onlineBusy, setOnlineBusy] = useState(false);
+  const [isOnlineMatch, setIsOnlineMatch] = useState(false);
+  const [opponentDisconnectedMsg, setOpponentDisconnectedMsg] = useState<string | null>(null);
+  const [onlineMatchSummary, setOnlineMatchSummary] = useState<OnlineMatchSummary | null>(null);
+
   const savedRef = useRef(saved);
   savedRef.current = saved;
   const isOnlineRef = useRef(isOnline);
   isOnlineRef.current = isOnline;
   const activeTournamentMatchRef = useRef<TournamentMatch | null>(null);
+  const authUserRef = useRef<User | null>(null);
+  authUserRef.current = authUser;
+  const onlineRoomRef = useRef<OnlineRoomSnapshot | null>(null);
+  onlineRoomRef.current = onlineRoom;
+  const onlineSideRef = useRef<TeamSide>('home');
+  onlineSideRef.current = onlineSide ?? 'home';
+  const isOnlineMatchRef = useRef(false);
+  isOnlineMatchRef.current = isOnlineMatch;
+  const onlineNicknameRef = useRef(onlineNickname);
+  onlineNicknameRef.current = onlineNickname;
 
   const baseHomeTeam = useMemo(() => getTeamById(saved.homeTeamId), [saved.homeTeamId]);
   const homeTeam = useMemo(
@@ -123,6 +180,7 @@ export default function App() {
   const inputManager = useMemo(() => new InputManager(), []);
   const cameraTraumaRef = useRef<((amount: number) => void) | null>(null);
   const engineRef = useRef<MatchEngine | null>(null);
+  const onlineClientRef = useRef<OnlineMultiplayerClient | null>(null);
 
   const persist = useCallback((next: SavedState) => {
     savedRef.current = next;
@@ -148,6 +206,9 @@ export default function App() {
         },
         onCameraTrauma: (amt) => cameraTraumaRef.current?.(amt),
         onMatchFinished: (finalStats: MatchStats) => {
+          if (isOnlineMatchRef.current) {
+            return;
+          }
           const prev = savedRef.current;
           const activeTourney = activeTournamentMatchRef.current;
           const win = finalStats.homeScore > finalStats.awayScore ? 1 : 0;
@@ -204,6 +265,167 @@ export default function App() {
     );
   }
 
+  // Subscribe to Firebase Authentication state
+  useEffect(() => {
+    const unsubscribe = subscribeAuthState((user) => {
+      setAuthUser(user);
+      if (user) {
+        const cleanName = sanitizeDisplayName(user.displayName, user.uid);
+        setOnlineNickname((prev) =>
+          prev === 'Joueur' || prev.trim().length === 0 ? cleanName : prev,
+        );
+        void ensurePlayerProfile(user.uid, cleanName).catch(() => {
+          // Non-fatal if offline or guest provider not yet enabled
+        });
+      }
+    });
+    return unsubscribe;
+  }, []);
+
+  // Handle incoming authoritative WebSocket multiplayer messages
+  const handleServerMessage = useCallback(
+    (msg: ServerToClientMessage) => {
+      switch (msg.type) {
+        case 'room:state': {
+          setOnlineRoom(msg.room);
+          setOnlineSide(msg.yourSide);
+          setOnlineError(null);
+          const mySlot = msg.room.players.find((p) => p.side === msg.yourSide);
+          if (mySlot) {
+            setOnlineTeamId(mySlot.teamId);
+            setOnlineFormation(mySlot.formation);
+          }
+          break;
+        }
+        case 'room:error': {
+          setOnlineError(msg.message);
+          setOnlineBusy(false);
+          break;
+        }
+        case 'match:start': {
+          setOnlineRoom(msg.room);
+          setOnlineSide(msg.yourSide);
+          onlineSideRef.current = msg.yourSide;
+          setIsOnlineMatch(true);
+          isOnlineMatchRef.current = true;
+          setOpponentDisconnectedMsg(null);
+          setOnlineMatchSummary(null);
+          setOnlineError(null);
+          setOnlineBusy(false);
+          setLastTournamentSummary(null);
+          activeTournamentMatchRef.current = null;
+          setActiveTournamentMatch(null);
+
+          const homeSlot = msg.room.players.find((p) => p.side === 'home');
+          const awaySlot = msg.room.players.find((p) => p.side === 'away');
+          const matchHome = getTeamById(homeSlot?.teamId ?? 'aurelia');
+          const matchAway = getTeamById(awaySlot?.teamId ?? 'nordic');
+
+          setActiveMatchTeams({ home: matchHome, away: matchAway });
+          inputManager.clearAll();
+          if (document.activeElement instanceof HTMLElement) {
+            document.activeElement.blur();
+          }
+
+          const engine = engineRef.current;
+          if (engine) {
+            engine.startNewMatch(
+              matchHome,
+              matchAway,
+              homeSlot?.formation ?? '4-3-3',
+              awaySlot?.formation ?? '4-3-3',
+              msg.room.halfDurationSeconds,
+              'balanced',
+              'balanced',
+              {
+                awayHumanControl: true,
+                localSide: msg.yourSide,
+                isOnlineClient: true,
+              },
+            );
+            setTeamVersion((v) => v + 1);
+          }
+
+          if (authUserRef.current) {
+            void markFirestoreRoomPlaying(msg.room.roomCode).catch(() => {});
+          }
+
+          setShellState('playing');
+          document.body.dataset.state = 'playing';
+          break;
+        }
+        case 'match:state': {
+          const engine = engineRef.current;
+          if (engine && isOnlineMatchRef.current) {
+            engine.applyOnlineSnapshot(msg.snapshot, onlineSideRef.current);
+          }
+          break;
+        }
+        case 'match:finished': {
+          inputManager.clearAll();
+          setOnlineRoom(msg.room);
+          const homeSlot = msg.room.players.find((p) => p.side === 'home');
+          const awaySlot = msg.room.players.find((p) => p.side === 'away');
+          const yourSide = onlineSideRef.current;
+          setOnlineMatchSummary({
+            homePlayerName: homeSlot?.nickname ?? 'Joueur 1',
+            awayPlayerName: awaySlot?.nickname ?? 'Joueur 2',
+            yourSide,
+          });
+          setOpponentDisconnectedMsg(null);
+          setShellState('gameover');
+          document.body.dataset.state = 'gameover';
+
+          const user = authUserRef.current;
+          if (user && homeSlot && awaySlot) {
+            void markFirestoreRoomFinished({
+              roomCode: msg.room.roomCode,
+              homeScore: msg.stats.homeScore,
+              awayScore: msg.stats.awayScore,
+              hostUid: homeSlot.uid,
+              guestUid: awaySlot.uid,
+            }).catch(() => {});
+
+            const myGoals = yourSide === 'home' ? msg.stats.homeScore : msg.stats.awayScore;
+            const oppGoals = yourSide === 'home' ? msg.stats.awayScore : msg.stats.homeScore;
+            const outcome = myGoals > oppGoals ? 'win' : myGoals < oppGoals ? 'loss' : 'draw';
+            void recordOnlinePlayerMatchStats(
+              user.uid,
+              onlineNicknameRef.current,
+              myGoals,
+              outcome,
+            ).catch(() => {});
+          }
+          break;
+        }
+        case 'opponent:disconnected': {
+          setOpponentDisconnectedMsg(msg.message);
+          inputManager.clearAll();
+          break;
+        }
+        case 'opponent:reconnected': {
+          setOpponentDisconnectedMsg(null);
+          break;
+        }
+      }
+    },
+    [inputManager],
+  );
+
+  // Initialize WebSocket client lifecycle
+  useEffect(() => {
+    const client = new OnlineMultiplayerClient({
+      onStatusChange: (st) => setSocketStatus(st),
+      onMessage: (msg) => handleServerMessage(msg),
+    });
+    onlineClientRef.current = client;
+
+    return () => {
+      client.disconnect();
+      onlineClientRef.current = null;
+    };
+  }, [handleServerMessage]);
+
   // Keep body data-state & online status mirrored
   useEffect(() => {
     document.body.dataset.state = shellState;
@@ -246,12 +468,14 @@ export default function App() {
       inputManager.clearAll();
       soundEngine.updateCrowdIntensity(0);
       setShellState((prev) => {
-        if (prev === 'playing') {
+        if (prev === 'playing' && !isOnlineMatchRef.current) {
           document.body.dataset.state = 'paused';
           return 'paused';
         }
         return prev;
       });
+    } else if (isOnlineMatchRef.current) {
+      onlineClientRef.current?.connect();
     }
   }, [inputManager]);
 
@@ -263,7 +487,7 @@ export default function App() {
       inputManager.clearAll();
       soundEngine.updateCrowdIntensity(0);
       setShellState((prev) => {
-        if (prev === 'playing') {
+        if (prev === 'playing' && !isOnlineMatchRef.current) {
           document.body.dataset.state = 'paused';
           return 'paused';
         }
@@ -278,10 +502,8 @@ export default function App() {
     window.addEventListener('offline', handleOffline);
     window.addEventListener('online', handleOnline);
 
-    // Initial live reachability probe
     void verifyConnection();
 
-    // Periodic check catches silent connection drops while tab is active
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
         void verifyConnection();
@@ -295,9 +517,225 @@ export default function App() {
     };
   }, [inputManager, verifyConnection]);
 
+  const handleOnlineInput = useCallback((snap: InputSnapshot) => {
+    onlineClientRef.current?.sendInput(snap);
+  }, []);
+
+  const handleOpenOnline = useCallback(() => {
+    if (!isOnlineRef.current) return;
+    setActivePanel(null);
+    setOnlineError(null);
+    setAuthError(null);
+    inputManager.clearAll();
+    onlineClientRef.current?.connect();
+    if (engineRef.current) {
+      engineRef.current.shellState = 'online';
+    }
+    setShellState('online');
+    document.body.dataset.state = 'online';
+  }, [inputManager]);
+
+  const handleSignInGoogle = useCallback(async () => {
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      await signInWithGoogle();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes('popup-closed-by-user')) {
+        setAuthError('Fenêtre de connexion Google fermée avant validation.');
+      } else {
+        setAuthError(`Impossible de se connecter avec Google : ${msg}`);
+      }
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
+
+  const handleSignOut = useCallback(async () => {
+    onlineClientRef.current?.send({ type: 'room:leave' });
+    onlineClientRef.current?.setActiveSession(null);
+    setOnlineRoom(null);
+    setOnlineSide(null);
+    await signOutPlayer();
+  }, []);
+
+  const handleCreateOnlineRoom = useCallback(async () => {
+    const user = authUserRef.current;
+    if (!user) return;
+    setOnlineBusy(true);
+    setOnlineError(null);
+    try {
+      const cleanName = sanitizeDisplayName(onlineNickname, user.uid);
+      const created = await createFirestoreRoom({
+        hostUid: user.uid,
+        hostName: cleanName,
+        hostTeamId: onlineTeamId,
+        hostFormation: onlineFormation,
+        halfDurationSeconds: savedRef.current.settings.halfDurationSeconds,
+      });
+
+      onlineClientRef.current?.connect();
+      onlineClientRef.current?.setActiveSession({
+        roomCode: created.roomCode,
+        uid: user.uid,
+      });
+      onlineClientRef.current?.send({
+        type: 'room:create',
+        roomCode: created.roomCode,
+        uid: user.uid,
+        nickname: cleanName,
+        teamId: created.hostTeamId,
+        formation: created.hostFormation,
+        halfDurationSeconds: created.halfDurationSeconds,
+      });
+    } catch (error) {
+      setOnlineError(
+        error instanceof Error ? error.message : 'Erreur lors de la création de la partie.',
+      );
+    } finally {
+      setOnlineBusy(false);
+    }
+  }, [onlineFormation, onlineNickname, onlineTeamId]);
+
+  const handleJoinOnlineRoom = useCallback(
+    async (rawCode: string) => {
+      const user = authUserRef.current;
+      if (!user) return;
+      const code = sanitizeRoomCode(rawCode);
+      if (code.length !== 5) {
+        setOnlineError('Veuillez saisir un code valide à 5 caractères (ex: A7K92).');
+        return;
+      }
+
+      setOnlineBusy(true);
+      setOnlineError(null);
+      try {
+        const cleanName = sanitizeDisplayName(onlineNickname, user.uid);
+        const joined = await joinFirestoreRoom({
+          roomCode: code,
+          guestUid: user.uid,
+          guestName: cleanName,
+          preferredTeamId: onlineTeamId,
+          guestFormation: onlineFormation,
+        });
+
+        onlineClientRef.current?.connect();
+        onlineClientRef.current?.setActiveSession({
+          roomCode: joined.roomCode,
+          uid: user.uid,
+        });
+        onlineClientRef.current?.send({
+          type: 'room:join',
+          roomCode: joined.roomCode,
+          uid: user.uid,
+          nickname: cleanName,
+          teamId: joined.guestTeamId || onlineTeamId,
+          formation: onlineFormation,
+        });
+      } catch (error) {
+        setOnlineError(
+          error instanceof Error ? error.message : 'Impossible de rejoindre cette partie.',
+        );
+      } finally {
+        setOnlineBusy(false);
+      }
+    },
+    [onlineFormation, onlineNickname, onlineTeamId],
+  );
+
+  const handleSelectOnlineTeam = useCallback(
+    (teamId: string) => {
+      setOnlineTeamId(teamId);
+      const room = onlineRoomRef.current;
+      const side = onlineSide;
+      if (room && side && room.status === 'waiting') {
+        onlineClientRef.current?.send({ type: 'room:updateProfile', teamId });
+        const mySlot = room.players.find((p) => p.side === side);
+        void updateFirestoreRoomLobby({
+          roomCode: room.roomCode,
+          role: side === 'home' ? 'host' : 'guest',
+          name: mySlot?.nickname ?? onlineNickname,
+          teamId,
+          formation: mySlot?.formation ?? onlineFormation,
+          ready: mySlot?.ready ?? false,
+        }).catch(() => {});
+      }
+    },
+    [onlineFormation, onlineNickname, onlineSide],
+  );
+
+  const handleSelectOnlineFormation = useCallback(
+    (formation: FormationId) => {
+      setOnlineFormation(formation);
+      const room = onlineRoomRef.current;
+      const side = onlineSide;
+      if (room && side && room.status === 'waiting') {
+        onlineClientRef.current?.send({ type: 'room:updateProfile', formation });
+        const mySlot = room.players.find((p) => p.side === side);
+        void updateFirestoreRoomLobby({
+          roomCode: room.roomCode,
+          role: side === 'home' ? 'host' : 'guest',
+          name: mySlot?.nickname ?? onlineNickname,
+          teamId: mySlot?.teamId ?? onlineTeamId,
+          formation,
+          ready: mySlot?.ready ?? false,
+        }).catch(() => {});
+      }
+    },
+    [onlineNickname, onlineSide, onlineTeamId],
+  );
+
+  const handleToggleOnlineReady = useCallback(() => {
+    const room = onlineRoomRef.current;
+    const side = onlineSide;
+    if (!room || !side) return;
+    const mySlot = room.players.find((p) => p.side === side);
+    const nextReady = !(mySlot?.ready ?? false);
+    onlineClientRef.current?.send({ type: 'room:updateProfile', ready: nextReady });
+    void updateFirestoreRoomLobby({
+      roomCode: room.roomCode,
+      role: side === 'home' ? 'host' : 'guest',
+      name: mySlot?.nickname ?? onlineNickname,
+      teamId: mySlot?.teamId ?? onlineTeamId,
+      formation: mySlot?.formation ?? onlineFormation,
+      ready: nextReady,
+    }).catch(() => {});
+  }, [onlineFormation, onlineNickname, onlineSide, onlineTeamId]);
+
+  const handleStartOnlineMatch = useCallback(() => {
+    if (!onlineRoomRef.current) return;
+    setOnlineBusy(true);
+    onlineClientRef.current?.send({ type: 'room:start' });
+  }, []);
+
+  const handleLeaveOnlineRoom = useCallback(() => {
+    const room = onlineRoomRef.current;
+    if (room && room.status === 'waiting' && onlineSide === 'home') {
+      void deleteWaitingFirestoreRoom(room.roomCode);
+    }
+    onlineClientRef.current?.send({ type: 'room:leave' });
+    onlineClientRef.current?.setActiveSession(null);
+    setOnlineRoom(null);
+    setOnlineSide(null);
+    setIsOnlineMatch(false);
+    isOnlineMatchRef.current = false;
+    setOpponentDisconnectedMsg(null);
+    setOnlineMatchSummary(null);
+    setOnlineError(null);
+  }, [onlineSide]);
+
+  const handleOnlineRematch = useCallback(() => {
+    onlineClientRef.current?.send({ type: 'match:rematch' });
+  }, []);
+
   const startMatch = useCallback(() => {
     if (!isOnlineRef.current) return;
     setActivePanel(null);
+    setIsOnlineMatch(false);
+    isOnlineMatchRef.current = false;
+    setOnlineMatchSummary(null);
+    setOpponentDisconnectedMsg(null);
     activeTournamentMatchRef.current = null;
     setActiveTournamentMatch(null);
     setLastTournamentSummary(null);
@@ -316,6 +754,11 @@ export default function App() {
         saved.settings.halfDurationSeconds,
         saved.homeMentality,
         saved.awayMentality,
+        {
+          awayHumanControl: false,
+          localSide: 'home',
+          isOnlineClient: false,
+        },
       );
       setTeamVersion((v) => v + 1);
     }
@@ -335,6 +778,9 @@ export default function App() {
   const handleOpenTournament = useCallback(() => {
     if (!isOnlineRef.current) return;
     setActivePanel(null);
+    setIsOnlineMatch(false);
+    isOnlineMatchRef.current = false;
+    setOnlineMatchSummary(null);
     activeTournamentMatchRef.current = null;
     setActiveTournamentMatch(null);
     setLastTournamentSummary(null);
@@ -399,6 +845,9 @@ export default function App() {
           : baseAway;
 
       setActivePanel(null);
+      setIsOnlineMatch(false);
+      isOnlineMatchRef.current = false;
+      setOnlineMatchSummary(null);
       activeTournamentMatchRef.current = match;
       setActiveTournamentMatch(match);
       setLastTournamentSummary(null);
@@ -417,6 +866,11 @@ export default function App() {
           cur.settings.halfDurationSeconds,
           cur.homeMentality,
           cur.awayMentality,
+          {
+            awayHumanControl: false,
+            localSide: 'home',
+            isOnlineClient: false,
+          },
         );
         setTeamVersion((v) => v + 1);
       }
@@ -450,6 +904,9 @@ export default function App() {
     setActiveTournamentMatch(null);
     setLastTournamentSummary(null);
     if (engineRef.current) {
+      engineRef.current.isOnlineClient = false;
+      engineRef.current.awayHumanControl = false;
+      engineRef.current.localSide = 'home';
       engineRef.current.shellState = 'tournament';
       engineRef.current.rebuildTeams();
     }
@@ -516,13 +973,15 @@ export default function App() {
     };
   }, [handleCycleCamera, handleTogglePause, handleToggleSound, inputManager]);
 
-  // Support ?autostart=1 or ?autostart=tournament for instant boot
+  // Support ?autostart=1 or ?autostart=tournament or ?autostart=online for instant boot
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('autostart') === '1') {
       startMatch();
     } else if (params.get('autostart') === 'tournament') {
       handleOpenTournament();
+    } else if (params.get('autostart') === 'online') {
+      handleOpenOnline();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -619,18 +1078,28 @@ export default function App() {
     }
   };
 
-  const handleReturnToTitle = () => {
+  const handleReturnToTitle = useCallback(() => {
     inputManager.clearAll();
+    if (isOnlineMatchRef.current || onlineRoomRef.current) {
+      handleLeaveOnlineRoom();
+    }
     activeTournamentMatchRef.current = null;
     setActiveTournamentMatch(null);
     setLastTournamentSummary(null);
+    setOnlineMatchSummary(null);
     setShellState('title');
     document.body.dataset.state = 'title';
     if (engineRef.current) {
+      engineRef.current.isOnlineClient = false;
+      engineRef.current.awayHumanControl = false;
+      engineRef.current.localSide = 'home';
       engineRef.current.shellState = 'title';
+      engineRef.current.homeTeam = homeTeam;
+      engineRef.current.awayTeam = awayTeam;
       engineRef.current.rebuildTeams();
+      setTeamVersion((v) => v + 1);
     }
-  };
+  }, [awayTeam, handleLeaveOnlineRoom, homeTeam, inputManager]);
 
   const currentTournament = useMemo(
     () => saved.tournament ?? createTournament(saved.homeTeamId, TEAMS, 1),
@@ -652,6 +1121,9 @@ export default function App() {
         shellState={isOnline ? shellState : 'paused'}
         cameraMode={saved.settings.cameraMode}
         teamVersion={teamVersion}
+        onlineMode={isOnlineMatch}
+        localSide={onlineSide ?? 'home'}
+        onOnlineInput={handleOnlineInput}
         onCameraTraumaRef={cameraTraumaRef}
         onContextLostChange={setContextLost}
       />
@@ -690,11 +1162,41 @@ export default function App() {
                 : null
             }
             tournamentBadge={tournamentBadge}
-            onStartMatch={startMatch}
+            onStartMatch={() => {
+              if (!isOnlineRef.current) return;
+              setActivePanel('teams');
+            }}
+            onOpenOnline={handleOpenOnline}
             onOpenTournament={handleOpenTournament}
             onOpenPanel={setActivePanel}
           />
-          {activePanel === 'player' ? (
+          {activePanel === 'teams' ? (
+            <TeamMatchupModal
+              homeTeam={homeTeam}
+              awayTeam={awayTeam}
+              onSelectUserTeam={(id) => {
+                const pairing = resolveUserVsRobotPairing(id, saved.awayTeamId, TEAMS);
+                handleUpdateTeams(pairing.homeTeamId, pairing.awayTeamId);
+              }}
+              onSelectRobotTeam={(id) => {
+                if (id === saved.homeTeamId) {
+                  handleUpdateTeams(saved.awayTeamId, id);
+                } else {
+                  handleUpdateTeams(saved.homeTeamId, id);
+                }
+              }}
+              onRandomizeRobot={() => {
+                const nextRobot = pickRandomRobotTeam(
+                  saved.homeTeamId,
+                  saved.awayTeamId,
+                  TEAMS,
+                );
+                handleUpdateTeams(saved.homeTeamId, nextRobot);
+              }}
+              onStartMatch={startMatch}
+              onClose={() => setActivePanel(null)}
+            />
+          ) : activePanel === 'player' ? (
             <PlayerStudioModal
               profile={saved.customPlayer}
               homeTeam={baseHomeTeam}
@@ -712,10 +1214,16 @@ export default function App() {
               settings={saved.settings}
               onClose={() => setActivePanel(null)}
               onSelectHomeTeam={(id) =>
-                handleUpdateTeams(id, id === saved.awayTeamId ? saved.homeTeamId : saved.awayTeamId)
+                handleUpdateTeams(
+                  id,
+                  id === saved.awayTeamId ? saved.homeTeamId : saved.awayTeamId,
+                )
               }
               onSelectAwayTeam={(id) =>
-                handleUpdateTeams(id === saved.homeTeamId ? saved.awayTeamId : saved.homeTeamId, id)
+                handleUpdateTeams(
+                  id === saved.homeTeamId ? saved.awayTeamId : saved.homeTeamId,
+                  id,
+                )
               }
               onSelectFormation={(id) => handleSelectFormation(id, true)}
               onSelectAwayFormation={handleSelectAwayFormation}
@@ -724,6 +1232,35 @@ export default function App() {
             />
           )}
         </>
+      )}
+
+      {/* Online 1v1 Multiplayer Lobby Screen */}
+      {shellState === 'online' && (
+        <OnlineScreen
+          authUser={authUser}
+          authLoading={authLoading}
+          authError={authError}
+          nickname={onlineNickname}
+          selectedTeamId={onlineTeamId}
+          selectedFormation={onlineFormation}
+          halfDurationSeconds={saved.settings.halfDurationSeconds}
+          socketStatus={socketStatus}
+          room={onlineRoom}
+          yourSide={onlineSide}
+          roomError={onlineError}
+          busy={onlineBusy}
+          onSignInGoogle={() => void handleSignInGoogle()}
+          onSignOut={() => void handleSignOut()}
+          onChangeNickname={setOnlineNickname}
+          onSelectTeam={handleSelectOnlineTeam}
+          onSelectFormation={handleSelectOnlineFormation}
+          onCreateRoom={() => void handleCreateOnlineRoom()}
+          onJoinRoom={(code) => void handleJoinOnlineRoom(code)}
+          onToggleReady={handleToggleOnlineReady}
+          onStartMatch={handleStartOnlineMatch}
+          onLeaveRoom={handleLeaveOnlineRoom}
+          onBackToTitle={handleReturnToTitle}
+        />
       )}
 
       {/* Tournament Bracket Shell State */}
@@ -746,6 +1283,16 @@ export default function App() {
           inputManager={inputManager}
           soundEnabled={saved.settings.soundEnabled}
           showTouchControls={saved.settings.showTouchControls}
+          onlineOverlay={
+            isOnlineMatch
+              ? {
+                  socketStatus,
+                  opponentDisconnectedMsg,
+                  onRetryReconnect: () => onlineClientRef.current?.connect(),
+                  onQuitOnline: handleReturnToTitle,
+                }
+              : null
+          }
           onCycleCamera={handleCycleCamera}
           onToggleSound={handleToggleSound}
           onPause={handleTogglePause}
@@ -759,6 +1306,7 @@ export default function App() {
           homeFormation={saved.homeFormation}
           homeMentality={saved.homeMentality}
           isTournament={activeTournamentMatch !== null}
+          isOnline={isOnlineMatch}
           onSelectFormation={(id) => handleSelectFormation(id, false)}
           onSelectMentality={handleSelectMentality}
           onResume={handleTogglePause}
@@ -781,7 +1329,8 @@ export default function App() {
           awayTeam={activeMatchTeams?.away ?? awayTeam}
           stats={hudSnapshot.stats}
           tournamentSummary={lastTournamentSummary}
-          onPlayAgain={startMatch}
+          onlineSummary={onlineMatchSummary}
+          onPlayAgain={isOnlineMatch ? handleOnlineRematch : startMatch}
           onViewBracket={handleReturnToBracket}
           onMainMenu={handleReturnToTitle}
         />

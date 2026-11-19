@@ -20,7 +20,7 @@ export type QualityLevel = 'low' | 'medium' | 'high';
 
 export type CameraMode = 'tv' | 'close' | 'player' | 'replay';
 
-export type GameShellState = 'title' | 'tournament' | 'playing' | 'paused' | 'gameover';
+export type GameShellState = 'title' | 'tournament' | 'online' | 'playing' | 'paused' | 'gameover';
 
 export type MatchPhase =
   | 'kickoff'
@@ -147,6 +147,12 @@ export interface SetPieceInfo {
   spot: Vec3;
   takerId: string | null;
   timer: number;
+  aimAngle?: number;
+  curve?: number;
+  distanceMeters?: number;
+  wallCenter?: Vec3 | null;
+  wallPerp?: { x: number; z: number } | null;
+  wallWidth?: number;
 }
 
 export interface ReplayPlayerFrame {
@@ -305,6 +311,8 @@ export interface MatchHudSnapshot {
     team: TeamSide;
     teamName: string;
     hint: string;
+    distanceMeters?: number;
+    aimNormalized?: number;
   } | null;
   goalBanner: {
     scorerName: string;

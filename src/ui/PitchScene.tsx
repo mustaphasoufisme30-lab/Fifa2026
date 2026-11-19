@@ -4,7 +4,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { BallVisual } from '../ball/ballMesh';
 import { CameraController } from '../camera/cameraController';
 import { buildStadium, StadiumResources } from '../core/stadiumMesh';
-import { CameraMode, GameSettings, GameShellState } from '../core/types';
+import { CameraMode, GameSettings, GameShellState, InputSnapshot, TeamSide } from '../core/types';
 import { InputManager } from '../controls/inputManager';
 import { MatchEngine } from '../game/matchEngine';
 import { PlayerVisual } from '../players/playerMesh';
@@ -16,6 +16,9 @@ interface PitchSceneProps {
   shellState: GameShellState;
   cameraMode: CameraMode;
   teamVersion: number;
+  onlineMode?: boolean;
+  localSide?: TeamSide;
+  onOnlineInput?: (input: InputSnapshot) => void;
   onCameraTraumaRef: React.MutableRefObject<((amount: number) => void) | null>;
   onContextLostChange?: (lost: boolean) => void;
 }
@@ -42,6 +45,9 @@ export function PitchScene({
   shellState,
   cameraMode,
   teamVersion,
+  onlineMode = false,
+  localSide = 'home',
+  onOnlineInput,
   onCameraTraumaRef,
   onContextLostChange,
 }: PitchSceneProps) {
@@ -55,6 +61,15 @@ export function PitchScene({
 
   const cameraModeRef = useRef(cameraMode);
   cameraModeRef.current = cameraMode;
+
+  const onlineModeRef = useRef(onlineMode);
+  onlineModeRef.current = onlineMode;
+
+  const localSideRef = useRef<TeamSide>(localSide);
+  localSideRef.current = localSide;
+
+  const onOnlineInputRef = useRef(onOnlineInput);
+  onOnlineInputRef.current = onOnlineInput;
 
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -238,6 +253,9 @@ export function PitchScene({
         engine.cameraMode = cameraModeRef.current;
 
         const inputSnap = inputManager.consumeSnapshot();
+        if (onlineModeRef.current && shellStateRef.current === 'playing') {
+          onOnlineInputRef.current?.(inputSnap);
+        }
         engine.step(dt, inputSnap);
 
         // Sync 3D visuals with live state or slow-motion goal replay proxy
@@ -246,7 +264,8 @@ export function PitchScene({
         stadiumRef.current?.update(elapsed, isGoalMoment);
 
         ballVisualRef.current?.sync(visual.ball, engine.isReplaying ? dt * 0.55 : dt);
-        const shotCharge = engine.getShotCharge();
+        const activeSide = onlineModeRef.current ? localSideRef.current : 'home';
+        const shotCharge = engine.getShotCharge(activeSide);
         const quality = settingsRef.current.quality;
         const allowShadowsGlobal = !isSoftwareGl && quality !== 'low';
         const shadowDistLimitSq = quality === 'high' ? 99999 : 34 * 34;
@@ -254,15 +273,19 @@ export function PitchScene({
         for (const p of visual.players) {
           const pv = playerVisualsRef.current.get(p.id);
           if (!pv) continue;
+          const isLocalControlled = p.isControlled && p.team === activeSide;
           const dx = p.position.x - visual.ball.position.x;
           const dz = p.position.z - visual.ball.position.z;
           const allowShadow =
             allowShadowsGlobal &&
-            (p.isControlled || dx * dx + dz * dz <= shadowDistLimitSq);
-          pv.sync(p, elapsed, p.isControlled ? shotCharge : 0, allowShadow);
+            (isLocalControlled || dx * dx + dz * dz <= shadowDistLimitSq);
+          pv.sync(p, elapsed, isLocalControlled ? shotCharge : 0, allowShadow);
         }
 
-        const controlled = visual.players.find((p) => p.isControlled) ?? null;
+        const controlled =
+          visual.players.find((p) => p.isControlled && p.team === activeSide) ??
+          visual.players.find((p) => p.isControlled) ??
+          null;
         cameraCtrl.update(
           camera,
           shellStateRef.current,

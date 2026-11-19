@@ -1,0 +1,285 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================================
+    // Helper Functions
+    // =========================================================================
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isNonEmptyString(val, maxLen) {
+      return val is string && val.size() >= 1 && val.size() <= maxLen;
+    }
+
+    function isValidRoomCode(code) {
+      return code is string && code.matches('^[A-Z0-9]{5}$');
+    }
+
+    function isValidFormation(f) {
+      return f in ['4-3-3', '4-4-2', '3-5-2', '4-2-3-1'];
+    }
+
+    function isValidTeamId(teamId) {
+      return teamId in [
+        'aurelia',
+        'nordic',
+        'valoria',
+        'metro',
+        'solaris',
+        'ironport',
+        'verde',
+        'caspian'
+      ];
+    }
+
+    function isValidHalfDuration(sec) {
+      return sec is int && sec in [60, 120, 180];
+    }
+
+    // =========================================================================
+    // Player Profile Schema & Invariants
+    // =========================================================================
+
+    function isValidPlayerProfile(data, uid) {
+      let allowedKeys = [
+        'uid',
+        'displayName',
+        'matchesPlayed',
+        'wins',
+        'draws',
+        'losses',
+        'goalsScored',
+        'createdAt',
+        'updatedAt'
+      ];
+      return data.keys().hasAll(allowedKeys) &&
+        data.keys().hasOnly(allowedKeys) &&
+        data.uid == uid &&
+        isNonEmptyString(data.displayName, 24) &&
+        data.matchesPlayed is int && data.matchesPlayed >= 0 && data.matchesPlayed <= 100000 &&
+        data.wins is int && data.wins >= 0 && data.wins <= 100000 &&
+        data.draws is int && data.draws >= 0 && data.draws <= 100000 &&
+        data.losses is int && data.losses >= 0 && data.losses <= 100000 &&
+        data.goalsScored is int && data.goalsScored >= 0 && data.goalsScored <= 1000000 &&
+        data.matchesPlayed == (data.wins + data.draws + data.losses) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // =========================================================================
+    // Online Room Schema & Invariants
+    // =========================================================================
+
+    function isValidRoom(data, roomCode) {
+      let allowedKeys = [
+        'roomCode',
+        'hostUid',
+        'hostName',
+        'hostTeamId',
+        'hostFormation',
+        'hostReady',
+        'guestUid',
+        'guestName',
+        'guestTeamId',
+        'guestFormation',
+        'guestReady',
+        'status',
+        'homeScore',
+        'awayScore',
+        'winnerUid',
+        'halfDurationSeconds',
+        'createdAt',
+        'updatedAt'
+      ];
+      return data.keys().hasAll(allowedKeys) &&
+        data.keys().hasOnly(allowedKeys) &&
+        isValidRoomCode(roomCode) &&
+        data.roomCode == roomCode &&
+        isNonEmptyString(data.hostUid, 128) &&
+        isNonEmptyString(data.hostName, 24) &&
+        isValidTeamId(data.hostTeamId) &&
+        isValidFormation(data.hostFormation) &&
+        data.hostReady is bool &&
+        data.guestUid is string && data.guestUid.size() <= 128 &&
+        data.guestName is string && data.guestName.size() <= 24 &&
+        (data.guestTeamId == '' || isValidTeamId(data.guestTeamId)) &&
+        isValidFormation(data.guestFormation) &&
+        data.guestReady is bool &&
+        data.status in ['waiting', 'playing', 'finished'] &&
+        data.homeScore is int && data.homeScore >= 0 && data.homeScore <= 30 &&
+        data.awayScore is int && data.awayScore >= 0 && data.awayScore <= 30 &&
+        data.winnerUid is string && data.winnerUid.size() <= 128 &&
+        isValidHalfDuration(data.halfDurationSeconds) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isRoomParticipant(data) {
+      return isSignedIn() &&
+        (data.hostUid == request.auth.uid || data.guestUid == request.auth.uid);
+    }
+
+    function isValidWinnerForScore(data, hostUid, guestUid) {
+      return (data.homeScore > data.awayScore && data.winnerUid == hostUid) ||
+        (data.awayScore > data.homeScore && data.winnerUid == guestUid) ||
+        (data.homeScore == data.awayScore && data.winnerUid == '');
+    }
+
+    // =========================================================================
+    // Collection Rules: /players/{uid}
+    // =========================================================================
+
+    match /players/{uid} {
+      // Exact-document lookup allowed for authenticated users (no PII stored);
+      // blanket list denied to prevent user enumeration.
+      allow get: if isSignedIn();
+      allow list: if false;
+
+      allow create: if isSignedIn() &&
+        request.auth.uid == uid &&
+        isValidPlayerProfile(incoming(), uid) &&
+        incoming().matchesPlayed == 0 &&
+        incoming().wins == 0 &&
+        incoming().draws == 0 &&
+        incoming().losses == 0 &&
+        incoming().goalsScored == 0 &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn() &&
+        request.auth.uid == uid &&
+        isValidPlayerProfile(incoming(), uid) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().matchesPlayed >= existing().matchesPlayed &&
+        incoming().matchesPlayed <= existing().matchesPlayed + 1 &&
+        incoming().wins >= existing().wins &&
+        incoming().wins <= existing().wins + 1 &&
+        incoming().draws >= existing().draws &&
+        incoming().draws <= existing().draws + 1 &&
+        incoming().losses >= existing().losses &&
+        incoming().losses <= existing().losses + 1 &&
+        incoming().goalsScored >= existing().goalsScored &&
+        incoming().goalsScored <= existing().goalsScored + 30;
+
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // Collection Rules: /rooms/{roomCode}
+    // =========================================================================
+
+    match /rooms/{roomCode} {
+      // Participants can always read their room; other signed-in users can only
+      // get a waiting room by its exact 5-character room code to join.
+      allow get: if isSignedIn() &&
+        (existing().hostUid == request.auth.uid ||
+         existing().guestUid == request.auth.uid ||
+         existing().status == 'waiting');
+
+      // Only list rooms the authenticated player is participating in.
+      allow list: if isSignedIn() &&
+        (resource.data.hostUid == request.auth.uid ||
+         resource.data.guestUid == request.auth.uid);
+
+      allow create: if isSignedIn() &&
+        isValidRoom(incoming(), roomCode) &&
+        incoming().hostUid == request.auth.uid &&
+        incoming().guestUid == '' &&
+        incoming().guestName == '' &&
+        incoming().guestTeamId == '' &&
+        incoming().guestReady == false &&
+        incoming().status == 'waiting' &&
+        incoming().homeScore == 0 &&
+        incoming().awayScore == 0 &&
+        incoming().winnerUid == '' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn() &&
+        isValidRoom(incoming(), roomCode) &&
+        existing().status != 'finished' &&
+        incoming().roomCode == existing().roomCode &&
+        incoming().hostUid == existing().hostUid &&
+        incoming().halfDurationSeconds == existing().halfDurationSeconds &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          // Action 1: Guest joins an open waiting room by code
+          (
+            existing().status == 'waiting' &&
+            existing().guestUid == '' &&
+            request.auth.uid != existing().hostUid &&
+            incoming().guestUid == request.auth.uid &&
+            isNonEmptyString(incoming().guestName, 24) &&
+            isValidTeamId(incoming().guestTeamId) &&
+            incoming().guestTeamId != existing().hostTeamId &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'guestUid', 'guestName', 'guestTeamId', 'guestFormation', 'guestReady', 'updatedAt'
+            ])
+          ) ||
+          // Action 2: Host updates lobby club, formation, name, or ready state
+          (
+            existing().status == 'waiting' &&
+            existing().hostUid == request.auth.uid &&
+            (existing().guestTeamId == '' || incoming().hostTeamId != existing().guestTeamId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'hostName', 'hostTeamId', 'hostFormation', 'hostReady', 'updatedAt'
+            ])
+          ) ||
+          // Action 3: Guest updates lobby club, formation, name, or ready state
+          (
+            existing().status == 'waiting' &&
+            existing().guestUid == request.auth.uid &&
+            isValidTeamId(incoming().guestTeamId) &&
+            incoming().guestTeamId != existing().hostTeamId &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'guestName', 'guestTeamId', 'guestFormation', 'guestReady', 'updatedAt'
+            ])
+          ) ||
+          // Action 4: Host or Guest transitions filled room from waiting -> playing
+          (
+            isRoomParticipant(existing()) &&
+            existing().status == 'waiting' &&
+            existing().guestUid != '' &&
+            incoming().status == 'playing' &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'updatedAt'
+            ])
+          ) ||
+          // Action 5: Host or Guest finalizes playing room -> finished (terminal lock)
+          (
+            isRoomParticipant(existing()) &&
+            existing().status == 'playing' &&
+            incoming().status == 'finished' &&
+            isValidWinnerForScore(incoming(), existing().hostUid, existing().guestUid) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'homeScore', 'awayScore', 'winnerUid', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isSignedIn() &&
+        existing().hostUid == request.auth.uid &&
+        existing().status == 'waiting';
+    }
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

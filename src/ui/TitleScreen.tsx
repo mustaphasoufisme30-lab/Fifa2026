@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Play, Settings, Shield, Trophy, UserRound, Users } from 'lucide-react';
+import { Globe, Play, Settings, Shield, Trophy, UserRound, Users } from 'lucide-react';
 import { CareerProgress, FormationId, TeamConfig } from '../core/types';
 
 export type TitlePanel = 'teams' | 'formation' | 'player' | 'settings' | null;
@@ -12,6 +12,7 @@ interface TitleScreenProps {
   customPlayerLabel?: string | null;
   tournamentBadge?: string | null;
   onStartMatch: () => void;
+  onOpenOnline: () => void;
   onOpenTournament: () => void;
   onOpenPanel: (panel: TitlePanel) => void;
 }
@@ -24,6 +25,7 @@ export function TitleScreen({
   customPlayerLabel,
   tournamentBadge,
   onStartMatch,
+  onOpenOnline,
   onOpenTournament,
   onOpenPanel,
 }: TitleScreenProps) {
@@ -47,7 +49,10 @@ export function TitleScreen({
     <div className="fixed inset-0 z-20 flex flex-col justify-between p-6 sm:p-10 pointer-events-none bg-gradient-to-r from-[#060d17]/90 via-[#060d17]/55 to-transparent">
       {/* Top Matchup Line (Clean unboxed typography, zero pills) */}
       <div className="flex items-center justify-between text-xs sm:text-sm text-slate-300 font-medium">
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
+            Vous
+          </span>
           <span
             className="w-2.5 h-2.5 rounded-xs inline-block"
             style={{ backgroundColor: homeTeam.kit.primary }}
@@ -59,6 +64,9 @@ export function TitleScreen({
             className="w-2.5 h-2.5 rounded-xs inline-block"
             style={{ backgroundColor: awayTeam.kit.primary }}
           />
+          <span className="text-[11px] font-bold uppercase tracking-wider text-rose-400">
+            Robot (IA)
+          </span>
         </div>
         <div className="hidden sm:flex items-center gap-2 text-slate-300 tabular-nums">
           <span>Formation {homeFormation}</span>
@@ -88,7 +96,7 @@ export function TitleScreen({
       </div>
 
       {/* Main Left-Third Title Lockup & Menu */}
-      <div className="max-w-md flex flex-col items-start gap-6 pointer-events-auto my-auto">
+      <div className="max-w-md flex flex-col items-start gap-5 pointer-events-auto my-auto">
         {/* Custom Inline SVG Crest & Wordmark */}
         <div className="flex items-center gap-4">
           <svg
@@ -122,16 +130,26 @@ export function TitleScreen({
           </div>
         </div>
 
-        {/* Primary Kick Off + Tournament Cup + Secondary Menu Actions */}
+        {/* Primary Kick Off + Online 1v1 + Tournament Cup + Secondary Menu Actions */}
         <div className="w-full flex flex-col gap-2.5">
           <button
             type="button"
             data-start="true"
             onClick={onStartMatch}
-            className="w-full sm:w-96 h-13 px-6 rounded-md bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-slate-950 font-display font-extrabold text-xl tracking-wider uppercase flex items-center justify-center gap-2.5 shadow-lg transition-colors whitespace-nowrap cursor-pointer"
+            className="w-full sm:w-96 h-12 px-6 rounded-md bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-slate-950 font-display font-extrabold text-xl tracking-wider uppercase flex items-center justify-center gap-2.5 shadow-lg transition-colors whitespace-nowrap cursor-pointer"
           >
             <Play className="w-5 h-5 fill-slate-950 shrink-0" />
             <span>PLAY</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="open-online-btn"
+            onClick={onOpenOnline}
+            className="w-full sm:w-96 h-11 px-5 rounded-md bg-sky-500 hover:bg-sky-400 active:bg-sky-600 text-slate-950 font-display font-extrabold text-base tracking-wider uppercase flex items-center justify-center gap-2 shadow-md transition-colors whitespace-nowrap cursor-pointer"
+          >
+            <Globe className="w-4 h-4 shrink-0" />
+            <span>MATCH EN LIGNE</span>
           </button>
 
           <button
@@ -152,7 +170,7 @@ export function TitleScreen({
             <button
               type="button"
               onClick={() => onOpenPanel('teams')}
-              className="h-11 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+              className="h-10 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
             >
               <Shield className="w-4 h-4 text-sky-400 shrink-0" />
               <span>TEAMS</span>
@@ -161,7 +179,7 @@ export function TitleScreen({
             <button
               type="button"
               onClick={() => onOpenPanel('formation')}
-              className="h-11 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+              className="h-10 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
             >
               <Users className="w-4 h-4 text-amber-400 shrink-0" />
               <span>FORMATION</span>
@@ -170,7 +188,7 @@ export function TitleScreen({
             <button
               type="button"
               onClick={() => onOpenPanel('player')}
-              className="h-11 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+              className="h-10 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
             >
               <UserRound className="w-4 h-4 text-violet-400 shrink-0" />
               <span>PLAYER</span>
@@ -179,7 +197,7 @@ export function TitleScreen({
             <button
               type="button"
               onClick={() => onOpenPanel('settings')}
-              className="h-11 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+              className="h-10 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
             >
               <Settings className="w-4 h-4 text-emerald-400 shrink-0" />
               <span>SETTINGS</span>

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Check,
@@ -71,6 +71,13 @@ export function OnlineScreen({
 }: OnlineScreenProps) {
   const [joinCodeInput, setJoinCodeInput] = useState('');
   const [copied, setCopied] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (room?.roomCode) {
+      containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [room?.roomCode]);
 
   const handleCopyCode = async () => {
     if (!room) return;
@@ -92,6 +99,7 @@ export function OnlineScreen({
 
   return (
     <div
+      ref={containerRef}
       data-testid="online-screen"
       className="fixed inset-0 z-20 flex flex-col bg-[#060d17]/92 text-white overflow-y-auto"
     >
@@ -287,6 +295,15 @@ export function OnlineScreen({
             </section>
 
             {/* Primary 2-Column Multiplayer Actions */}
+            {roomError && (
+              <div
+                role="alert"
+                className="p-3 rounded-md bg-rose-950/85 border border-rose-500/60 text-sm text-rose-200"
+              >
+                {roomError}
+              </div>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {/* CRÉER UNE PARTIE */}
               <section className="rounded-lg bg-[#0d192a] border border-emerald-400/40 p-5 flex flex-col justify-between gap-4">

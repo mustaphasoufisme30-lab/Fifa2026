@@ -19,12 +19,15 @@ export interface OnlineClientListeners {
   onMessage?: (msg: ServerToClientMessage) => void;
 }
 
+const AUTH_TIMEOUT_MS = 6000;
+
 export class OnlineMultiplayerClient {
   private ws: WebSocket | null = null;
   private status: OnlineSocketStatus = 'disconnected';
   private listeners: OnlineClientListeners;
   private reconnectTimer: number | null = null;
   private pingTimer: number | null = null;
+  private authTimeoutTimer: number | null = null;
   private reconnectAttempts = 0;
   private shouldReconnect = false;
   private activeSession: ActiveOnlineSession | null = null;
@@ -34,9 +37,24 @@ export class OnlineMultiplayerClient {
   private isAuthenticated = false;
   private authInFlight = false;
   private retriedTokenRefresh = false;
+  private handleVisibilityBound: (() => void) | null = null;
 
   constructor(listeners: OnlineClientListeners) {
     this.listeners = listeners;
+    if (typeof document !== 'undefined') {
+      this.handleVisibilityBound = () => {
+        if (document.visibilityState === 'visible' && this.shouldReconnect) {
+          if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            this.connect();
+          } else if (!this.isAuthenticated && !this.authInFlight) {
+            void this.authenticateSocket(false);
+          } else {
+            this.sendRaw({ type: 'ping', clientTime: Date.now() });
+          }
+        }
+      };
+      document.addEventListener('visibilitychange', this.handleVisibilityBound);
+    }
   }
 
   public setActiveSession(session: ActiveOnlineSession | null): void {
@@ -57,10 +75,27 @@ export class OnlineMultiplayerClient {
   }
 
   public reauthenticate(): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN && !this.isAuthenticated) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      if (this.shouldReconnect) {
+        this.connect();
+      }
+      return;
+    }
+    if (!this.isAuthenticated) {
       this.retriedTokenRefresh = false;
+      this.authInFlight = false;
+      this.clearAuthTimeout();
       void this.authenticateSocket(false);
     }
+  }
+
+  public resetAuth(): void {
+    this.isAuthenticated = false;
+    this.authInFlight = false;
+    this.retriedTokenRefresh = false;
+    this.clearAuthTimeout();
+    this.activeSession = null;
+    this.outboundQueue = [];
   }
 
   public connect(): void {
@@ -69,7 +104,7 @@ export class OnlineMultiplayerClient {
       this.ws &&
       (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)
     ) {
-      if (this.ws.readyState === WebSocket.OPEN && !this.isAuthenticated) {
+      if (this.ws.readyState === WebSocket.OPEN && !this.isAuthenticated && !this.authInFlight) {
         void this.authenticateSocket(false);
       }
       return;
@@ -90,6 +125,7 @@ export class OnlineMultiplayerClient {
         this.isAuthenticated = false;
         this.authInFlight = false;
         this.retriedTokenRefresh = false;
+        this.clearAuthTimeout();
         this.setStatus('connected');
         this.startPingLoop();
         void this.authenticateSocket(false);
@@ -105,6 +141,7 @@ export class OnlineMultiplayerClient {
           }
 
           if (msg.type === 'auth:ok') {
+            this.clearAuthTimeout();
             this.isAuthenticated = true;
             this.authInFlight = false;
             this.retriedTokenRefresh = false;
@@ -114,6 +151,7 @@ export class OnlineMultiplayerClient {
           }
 
           if (msg.type === 'auth:error') {
+            this.clearAuthTimeout();
             this.isAuthenticated = false;
             this.authInFlight = false;
             if (!this.retriedTokenRefresh && this.listeners.getAuthToken) {
@@ -133,6 +171,7 @@ export class OnlineMultiplayerClient {
 
       ws.onclose = () => {
         this.stopPingLoop();
+        this.clearAuthTimeout();
         this.ws = null;
         this.isAuthenticated = false;
         this.authInFlight = false;
@@ -159,9 +198,14 @@ export class OnlineMultiplayerClient {
     this.isAuthenticated = false;
     this.authInFlight = false;
     this.stopPingLoop();
+    this.clearAuthTimeout();
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.handleVisibilityBound && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.handleVisibilityBound);
+      this.handleVisibilityBound = null;
     }
     if (this.ws) {
       try {
@@ -186,6 +230,18 @@ export class OnlineMultiplayerClient {
     }
 
     if (msg.type !== 'match:input') {
+      if (
+        msg.type === 'room:create' ||
+        msg.type === 'room:join' ||
+        msg.type === 'room:reconnect'
+      ) {
+        this.outboundQueue = this.outboundQueue.filter(
+          (queued) =>
+            queued.type !== 'room:create' &&
+            queued.type !== 'room:join' &&
+            queued.type !== 'room:reconnect',
+        );
+      }
       this.outboundQueue.push(msg);
     }
 
@@ -248,8 +304,30 @@ export class OnlineMultiplayerClient {
         return;
       }
       this.sendRaw({ type: 'auth', idToken });
+
+      // Guard against mobile half-open sockets after OAuth popup suspension
+      this.clearAuthTimeout();
+      this.authTimeoutTimer = window.setTimeout(() => {
+        this.authTimeoutTimer = null;
+        if (this.authInFlight && !this.isAuthenticated && this.ws) {
+          this.authInFlight = false;
+          try {
+            this.ws.close();
+          } catch {
+            // onclose will schedule a clean reconnect
+          }
+        }
+      }, AUTH_TIMEOUT_MS);
     } catch {
       this.authInFlight = false;
+      this.clearAuthTimeout();
+    }
+  }
+
+  private clearAuthTimeout(): void {
+    if (this.authTimeoutTimer !== null) {
+      window.clearTimeout(this.authTimeoutTimer);
+      this.authTimeoutTimer = null;
     }
   }
 

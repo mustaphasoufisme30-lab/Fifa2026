@@ -92,6 +92,71 @@ function toRoomBootstrap(doc: FirestoreRoomDoc): RoomBootstrapData {
   };
 }
 
+function firestoreDocToRoomSnapshot(
+  doc: FirestoreRoomDoc,
+  existingWsRoom?: OnlineRoomSnapshot | null,
+): OnlineRoomSnapshot {
+  const existingHome = existingWsRoom?.players.find((p) => p.uid === doc.hostUid);
+  const existingGuest = doc.guestUid
+    ? existingWsRoom?.players.find((p) => p.uid === doc.guestUid)
+    : undefined;
+
+  const players: OnlineRoomSnapshot['players'] = [
+    {
+      clientId: existingHome?.clientId ?? `fs_host_${doc.roomCode}`,
+      uid: doc.hostUid,
+      nickname: doc.hostName,
+      side: 'home',
+      teamId: doc.hostTeamId,
+      formation: doc.hostFormation,
+      ready: doc.hostReady,
+      connected: existingHome?.connected ?? true,
+    },
+  ];
+
+  if (doc.guestUid) {
+    players.push({
+      clientId: existingGuest?.clientId ?? `fs_guest_${doc.roomCode}`,
+      uid: doc.guestUid,
+      nickname: doc.guestName || 'Joueur 2',
+      side: 'away',
+      teamId: doc.guestTeamId || 'nordic',
+      formation: doc.guestFormation,
+      ready: doc.guestReady,
+      connected: existingGuest?.connected ?? true,
+    });
+  }
+
+  return {
+    roomCode: doc.roomCode,
+    status: doc.status,
+    halfDurationSeconds: doc.halfDurationSeconds,
+    matchNumber: existingWsRoom?.matchNumber ?? 0,
+    players,
+  };
+}
+
+function formatOnlineError(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  const raw = error.message || '';
+  if (raw.startsWith('{') && raw.includes('"error"')) {
+    try {
+      const parsed = JSON.parse(raw) as { error?: string };
+      const inner = parsed.error || '';
+      if (inner.includes('PERMISSION_DENIED') || inner.includes('Missing or insufficient permissions')) {
+        return 'Accès Firestore refusé. Vérifiez que votre compte Google est connecté puis réessayez.';
+      }
+      if (inner.includes('offline') || inner.includes('unavailable')) {
+        return 'Connexion au serveur Firestore indisponible. Vérifiez votre accès Internet.';
+      }
+      if (inner) return inner;
+    } catch {
+      // Fall through to raw message
+    }
+  }
+  return raw || fallback;
+}
+
 export default function App() {
   const [saved, setSaved] = useState<SavedState>(() => loadSavedState());
   const [shellState, setShellState] = useState<GameShellState>('title');
@@ -478,18 +543,20 @@ export default function App() {
         onlineClientRef.current?.updateSessionBootstrap(bootstrap);
 
         const wsRoom = onlineRoomRef.current;
-        if (
-          wsRoom &&
-          wsRoom.roomCode === doc.roomCode &&
-          wsRoom.status === 'waiting' &&
-          doc.guestUid &&
-          wsRoom.players.length < 2
-        ) {
-          onlineClientRef.current?.send({
-            type: 'room:reconnect',
-            roomCode: doc.roomCode,
-            bootstrap,
-          });
+        if (wsRoom && wsRoom.roomCode === doc.roomCode && wsRoom.status === 'waiting') {
+          setOnlineRoom((prev) =>
+            prev && prev.roomCode === doc.roomCode && prev.status === 'waiting'
+              ? firestoreDocToRoomSnapshot(doc, prev)
+              : prev,
+          );
+
+          if (doc.guestUid && wsRoom.players.length < 2) {
+            onlineClientRef.current?.send({
+              type: 'room:reconnect',
+              roomCode: doc.roomCode,
+              bootstrap,
+            });
+          }
         }
       },
       () => {
@@ -633,7 +700,7 @@ export default function App() {
 
   const handleSignOut = useCallback(async () => {
     onlineClientRef.current?.send({ type: 'room:leave' });
-    onlineClientRef.current?.setActiveSession(null);
+    onlineClientRef.current?.resetAuth();
     setOnlineRoom(null);
     setOnlineSide(null);
     await signOutPlayer();
@@ -654,6 +721,12 @@ export default function App() {
         halfDurationSeconds: savedRef.current.settings.halfDurationSeconds,
       });
 
+      // Immediately enter the waiting lobby and display the generated 5-character
+      // room code on screen without blocking on WebSocket handshake latency.
+      const initialRoom = firestoreDocToRoomSnapshot(created);
+      setOnlineRoom(initialRoom);
+      setOnlineSide('home');
+
       const bootstrap = toRoomBootstrap(created);
       onlineClientRef.current?.connect();
       onlineClientRef.current?.setActiveSession({
@@ -670,7 +743,7 @@ export default function App() {
       });
     } catch (error) {
       setOnlineError(
-        error instanceof Error ? error.message : 'Erreur lors de la création de la partie.',
+        formatOnlineError(error, 'Erreur lors de la création de la partie.'),
       );
     } finally {
       setOnlineBusy(false);
@@ -699,6 +772,10 @@ export default function App() {
           guestFormation: onlineFormation,
         });
 
+        const joinedSide: TeamSide = joined.hostUid === user.uid ? 'home' : 'away';
+        setOnlineRoom(firestoreDocToRoomSnapshot(joined));
+        setOnlineSide(joinedSide);
+
         const bootstrap = toRoomBootstrap(joined);
         onlineClientRef.current?.connect();
         onlineClientRef.current?.setActiveSession({
@@ -715,7 +792,7 @@ export default function App() {
         });
       } catch (error) {
         setOnlineError(
-          error instanceof Error ? error.message : 'Impossible de rejoindre cette partie.',
+          formatOnlineError(error, 'Impossible de rejoindre cette partie.'),
         );
       } finally {
         setOnlineBusy(false);

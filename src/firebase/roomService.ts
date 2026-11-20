@@ -7,7 +7,8 @@ import {
   setDoc,
   updateDoc,
 } from 'firebase/firestore';
-import { FormationId } from '../core/types';
+import { FormationId, InputSnapshot } from '../core/types';
+import { OnlineMatchSnapshot } from '../multiplayer/protocol';
 import { TEAMS } from '../teams/teams';
 import { db, handleFirestoreError, OperationType } from './firebase';
 
@@ -428,6 +429,143 @@ export function subscribeFirestoreRoom(
       } catch (wrapped) {
         onError?.(wrapped instanceof Error ? wrapped : new Error(String(wrapped)));
       }
+    },
+  );
+}
+
+// =============================================================================
+// Firestore Live Match Sync Fallback (/rooms/{roomCode}/live/{channel})
+// =============================================================================
+
+function clampAxis(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(-1, Math.min(1, v));
+}
+
+export async function publishFirestoreMatchState(
+  roomCode: string,
+  tick: number,
+  seq: number,
+  snapshot: OnlineMatchSnapshot,
+): Promise<void> {
+  const code = sanitizeRoomCode(roomCode);
+  const payload = JSON.stringify(snapshot);
+  if (payload.length > 39500) return;
+  await setDoc(doc(db, 'rooms', code, 'live', 'state'), {
+    tick: Math.max(0, Math.min(1000000, Math.round(tick))),
+    seq: Math.max(0, Math.min(1000000, Math.round(seq))),
+    payload,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export function subscribeFirestoreMatchState(
+  roomCode: string,
+  onSnapshotData: (snapshot: OnlineMatchSnapshot, seq: number) => void,
+): () => void {
+  const code = sanitizeRoomCode(roomCode);
+  return onSnapshot(
+    doc(db, 'rooms', code, 'live', 'state'),
+    (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      if (typeof data.payload !== 'string') return;
+      try {
+        const parsed = JSON.parse(data.payload) as OnlineMatchSnapshot;
+        onSnapshotData(parsed, Number(data.seq ?? 0));
+      } catch {
+        // Ignore malformed snapshot
+      }
+    },
+    () => {
+      // Transient network error; Firestore SDK retries automatically
+    },
+  );
+}
+
+export async function publishFirestoreGuestInput(
+  roomCode: string,
+  seq: number,
+  input: InputSnapshot,
+): Promise<void> {
+  const code = sanitizeRoomCode(roomCode);
+  await setDoc(doc(db, 'rooms', code, 'live', 'guestInput'), {
+    seq: Math.max(0, Math.min(1000000, Math.round(seq))),
+    moveX: clampAxis(input.moveX),
+    moveZ: clampAxis(input.moveZ),
+    sprint: Boolean(input.sprint),
+    passPressed: Boolean(input.passPressed),
+    lobPressed: Boolean(input.lobPressed),
+    shootPressed: Boolean(input.shootPressed),
+    shootHeld: Boolean(input.shootHeld),
+    shootReleased: Boolean(input.shootReleased),
+    tacklePressed: Boolean(input.tacklePressed),
+    switchPressed: Boolean(input.switchPressed),
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export function subscribeFirestoreGuestInput(
+  roomCode: string,
+  onInput: (input: InputSnapshot, seq: number) => void,
+): () => void {
+  const code = sanitizeRoomCode(roomCode);
+  return onSnapshot(
+    doc(db, 'rooms', code, 'live', 'guestInput'),
+    (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      onInput(
+        {
+          moveX: clampAxis(Number(data.moveX ?? 0)),
+          moveZ: clampAxis(Number(data.moveZ ?? 0)),
+          sprint: Boolean(data.sprint),
+          passPressed: Boolean(data.passPressed),
+          lobPressed: Boolean(data.lobPressed),
+          shootPressed: Boolean(data.shootPressed),
+          shootHeld: Boolean(data.shootHeld),
+          shootReleased: Boolean(data.shootReleased),
+          tacklePressed: Boolean(data.tacklePressed),
+          switchPressed: Boolean(data.switchPressed),
+        },
+        Number(data.seq ?? 0),
+      );
+    },
+    () => {
+      // Transient network error
+    },
+  );
+}
+
+export async function publishFirestoreRematch(
+  roomCode: string,
+  rematchCount: number,
+  requestedBy: string,
+): Promise<void> {
+  const code = sanitizeRoomCode(roomCode);
+  await setDoc(doc(db, 'rooms', code, 'live', 'rematch'), {
+    rematchCount: Math.max(1, Math.min(100, Math.round(rematchCount))),
+    requestedBy,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export function subscribeFirestoreRematch(
+  roomCode: string,
+  onRematch: (rematchCount: number) => void,
+): () => void {
+  const code = sanitizeRoomCode(roomCode);
+  return onSnapshot(
+    doc(db, 'rooms', code, 'live', 'rematch'),
+    (snap) => {
+      if (!snap.exists()) return;
+      const count = Number(snap.data().rematchCount ?? 0);
+      if (count >= 1) {
+        onRematch(count);
+      }
+    },
+    () => {
+      // Transient network error
     },
   );
 }

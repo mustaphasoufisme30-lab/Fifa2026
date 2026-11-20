@@ -66,4 +66,11 @@ describe('Firestore Security Rules & Blueprint Integrity', () => {
       );
     }
   });
+
+  it('restricts /rooms/{roomCode}/live/{channel} strictly to host/guest participants with role-separated writes', () => {
+    assert.match(rulesSource, /match \/live\/\{channel\}/);
+    assert.match(rulesSource, /channel == 'state' &&\s*parentRoom\(\)\.hostUid == request\.auth\.uid/);
+    assert.match(rulesSource, /channel == 'guestInput' &&\s*parentRoom\(\)\.guestUid == request\.auth\.uid/);
+    assert.match(rulesSource, /channel == 'rematch'/);
+  });
 });

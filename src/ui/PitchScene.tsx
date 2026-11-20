@@ -7,7 +7,11 @@ import { buildStadium, StadiumResources } from '../core/stadiumMesh';
 import { CameraMode, GameSettings, GameShellState, InputSnapshot, TeamSide } from '../core/types';
 import { InputManager } from '../controls/inputManager';
 import { MatchEngine } from '../game/matchEngine';
-import { PlayerVisual } from '../players/playerMesh';
+import {
+  PlayerMaterialPool,
+  PlayerShadowBatch,
+  PlayerVisual,
+} from '../players/playerMesh';
 
 interface PitchSceneProps {
   engineRef: React.MutableRefObject<MatchEngine | null>;
@@ -19,6 +23,7 @@ interface PitchSceneProps {
   onlineMode?: boolean;
   localSide?: TeamSide;
   onOnlineInput?: (input: InputSnapshot) => void;
+  consumeRemoteAwayInput?: () => InputSnapshot | undefined;
   onCameraTraumaRef: React.MutableRefObject<((amount: number) => void) | null>;
   onContextLostChange?: (lost: boolean) => void;
 }
@@ -48,6 +53,7 @@ export function PitchScene({
   onlineMode = false,
   localSide = 'home',
   onOnlineInput,
+  consumeRemoteAwayInput,
   onCameraTraumaRef,
   onContextLostChange,
 }: PitchSceneProps) {
@@ -71,10 +77,15 @@ export function PitchScene({
   const onOnlineInputRef = useRef(onOnlineInput);
   onOnlineInputRef.current = onOnlineInput;
 
+  const consumeRemoteAwayInputRef = useRef(consumeRemoteAwayInput);
+  consumeRemoteAwayInputRef.current = consumeRemoteAwayInput;
+
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const stadiumRef = useRef<StadiumResources | null>(null);
   const playerVisualsRef = useRef<Map<string, PlayerVisual>>(new Map());
+  const playerMaterialPoolRef = useRef<PlayerMaterialPool | null>(null);
+  const playerShadowBatchRef = useRef<PlayerShadowBatch | null>(null);
   const ballVisualRef = useRef<BallVisual | null>(null);
   const cameraCtrlRef = useRef<CameraController | null>(null);
   const keyLightRef = useRef<THREE.DirectionalLight | null>(null);
@@ -91,14 +102,19 @@ export function PitchScene({
       pv.dispose();
     }
     playerVisualsRef.current.clear();
+    playerMaterialPoolRef.current?.dispose();
+
+    const pool = new PlayerMaterialPool();
+    playerMaterialPoolRef.current = pool;
 
     for (const p of engine.players) {
       const kit = p.team === 'home' ? engine.homeTeam.kit : engine.awayTeam.kit;
-      const pv = new PlayerVisual(p, kit);
-      pv.sync(p, 0);
+      const pv = new PlayerVisual(p, kit, pool);
+      pv.sync(p, 0, 0, true, 0.016, engine.ball);
       scene.add(pv.root);
       playerVisualsRef.current.set(p.id, pv);
     }
+    playerShadowBatchRef.current?.sync(engine.players);
   };
 
   // Mount Three.js renderer & stadium once
@@ -119,7 +135,7 @@ export function PitchScene({
     renderer.setSize(width, height);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.12;
+    renderer.toneMappingExposure = 1.04;
     renderer.setPixelRatio(
       isSoftwareGl
         ? 1
@@ -136,43 +152,52 @@ export function PitchScene({
     rendererRef.current = renderer;
 
     const scene = new THREE.Scene();
-    const skyColor = new THREE.Color(0x0b1524);
+    const skyColor = new THREE.Color(0x6fb7ec);
     scene.background = skyColor;
-    scene.fog = new THREE.FogExp2(0x0b1524, 0.0022);
+    // Very light daytime horizon haze — keeps entire 105m pitch crystal clear
+    scene.fog = new THREE.Fog(0xb5ddf7, 145, 300);
     sceneRef.current = scene;
 
     // Mandatory Studio Environment Reflections (RoomEnvironment)
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
     const envTarget = pmremGenerator.fromScene(new RoomEnvironment(), 0.04);
     scene.environment = envTarget.texture;
+    scene.environmentIntensity = 0.35;
     pmremGenerator.dispose();
 
-    // Warm/Cool 3-Point Stadium Lighting
-    const hemiLight = new THREE.HemisphereLight(0x9ec5ff, 0x1b3a24, 0.9);
-    hemiLight.position.set(0, 50, 0);
+    // Balanced Daylight Stadium 3-Point Rig (single shadow caster for mobile performance)
+    const hemiLight = new THREE.HemisphereLight(0xd8eeff, 0x3b6620, 0.85);
+    hemiLight.position.set(0, 55, 0);
     scene.add(hemiLight);
 
-    const keyLight = new THREE.DirectionalLight(0xfff4e0, 1.85);
-    keyLight.position.set(28, 48, 32);
+    const sunOffsetX = 32;
+    const sunOffsetY = 50;
+    const sunOffsetZ = 22;
+    const keyLight = new THREE.DirectionalLight(0xfff4dc, 1.55);
+    keyLight.position.set(sunOffsetX, sunOffsetY, sunOffsetZ);
+    keyLight.target.position.set(0, 0, 0);
+    scene.add(keyLight.target);
     keyLight.castShadow = !isSoftwareGl && settingsRef.current.quality !== 'low';
     keyLight.shadow.mapSize.width = 1024;
     keyLight.shadow.mapSize.height = 1024;
-    keyLight.shadow.camera.near = 5;
-    keyLight.shadow.camera.far = 140;
-    keyLight.shadow.camera.left = -62;
-    keyLight.shadow.camera.right = 62;
-    keyLight.shadow.camera.top = 45;
-    keyLight.shadow.camera.bottom = -45;
-    keyLight.shadow.bias = -0.0005;
-    keyLight.shadow.normalBias = 0.02;
+    keyLight.shadow.radius = 2.5;
+    keyLight.shadow.camera.near = 10;
+    keyLight.shadow.camera.far = 135;
+    // Tight action-centered shadow frustum for crisp mobile shadows at 1024x1024
+    keyLight.shadow.camera.left = -38;
+    keyLight.shadow.camera.right = 38;
+    keyLight.shadow.camera.top = 30;
+    keyLight.shadow.camera.bottom = -30;
+    keyLight.shadow.bias = -0.0004;
+    keyLight.shadow.normalBias = 0.025;
     scene.add(keyLight);
     keyLightRef.current = keyLight;
 
-    const rimLight = new THREE.DirectionalLight(0x88b8ff, 0.55);
-    rimLight.position.set(-34, 28, -36);
-    scene.add(rimLight);
+    const fillLight = new THREE.DirectionalLight(0xc2e1ff, 0.32);
+    fillLight.position.set(-34, 30, -32);
+    scene.add(fillLight);
 
-    const camera = new THREE.PerspectiveCamera(46, width / height, 0.5, 280);
+    const camera = new THREE.PerspectiveCamera(42, width / height, 0.5, 290);
     const cameraCtrl = new CameraController();
     cameraCtrlRef.current = cameraCtrl;
     onCameraTraumaRef.current = (amt: number) => cameraCtrl.addTrauma(amt);
@@ -185,6 +210,10 @@ export function PitchScene({
     const ballVisual = new BallVisual(maxAnisotropy);
     scene.add(ballVisual.group);
     ballVisualRef.current = ballVisual;
+
+    const shadowBatch = new PlayerShadowBatch(24);
+    scene.add(shadowBatch.mesh);
+    playerShadowBatchRef.current = shadowBatch;
 
     rebuildPlayerVisuals();
 
@@ -256,14 +285,19 @@ export function PitchScene({
         if (onlineModeRef.current && shellStateRef.current === 'playing') {
           onOnlineInputRef.current?.(inputSnap);
         }
-        engine.step(dt, inputSnap);
+        const remoteAwayInput =
+          onlineModeRef.current && shellStateRef.current === 'playing'
+            ? consumeRemoteAwayInputRef.current?.()
+            : undefined;
+        engine.step(dt, inputSnap, remoteAwayInput);
 
         // Sync 3D visuals with live state or slow-motion goal replay proxy
         const visual = engine.getVisualState();
         const isGoalMoment = engine.phase === 'goal' || engine.isReplaying;
         stadiumRef.current?.update(elapsed, isGoalMoment);
 
-        ballVisualRef.current?.sync(visual.ball, engine.isReplaying ? dt * 0.55 : dt);
+        const animDt = engine.isReplaying ? dt * 0.55 : dt;
+        ballVisualRef.current?.sync(visual.ball, animDt);
         const activeSide = onlineModeRef.current ? localSideRef.current : 'home';
         const shotCharge = engine.getShotCharge(activeSide);
         const quality = settingsRef.current.quality;
@@ -279,13 +313,35 @@ export function PitchScene({
           const allowShadow =
             allowShadowsGlobal &&
             (isLocalControlled || dx * dx + dz * dz <= shadowDistLimitSq);
-          pv.sync(p, elapsed, isLocalControlled ? shotCharge : 0, allowShadow);
+          pv.sync(
+            p,
+            elapsed,
+            isLocalControlled ? shotCharge : 0,
+            allowShadow,
+            animDt,
+            visual.ball,
+          );
         }
+        playerShadowBatchRef.current?.sync(visual.players);
 
         const controlled =
           visual.players.find((p) => p.isControlled && p.team === activeSide) ??
           visual.players.find((p) => p.isControlled) ??
           null;
+
+        // Keep tight directional sun shadow frustum centered around active play
+        if (allowShadowsGlobal) {
+          const shadowCenterX = THREE.MathUtils.clamp(visual.ball.position.x, -34, 34);
+          const shadowCenterZ = THREE.MathUtils.clamp(visual.ball.position.z, -16, 16);
+          keyLight.target.position.set(shadowCenterX, 0, shadowCenterZ);
+          keyLight.position.set(
+            shadowCenterX + sunOffsetX,
+            sunOffsetY,
+            shadowCenterZ + sunOffsetZ,
+          );
+          keyLight.target.updateMatrixWorld();
+        }
+
         cameraCtrl.update(
           camera,
           shellStateRef.current,
@@ -324,6 +380,10 @@ export function PitchScene({
         pv.dispose();
       }
       playerVisualsRef.current.clear();
+      playerMaterialPoolRef.current?.dispose();
+      playerMaterialPoolRef.current = null;
+      shadowBatch.dispose();
+      playerShadowBatchRef.current = null;
       ballVisual.dispose();
       stadium.dispose();
       envTarget.dispose();
@@ -373,7 +433,7 @@ export function PitchScene({
     <div
       ref={mountRef}
       data-testid="pitch-canvas-container"
-      className="fixed inset-0 w-full h-full bg-[#0b1524]"
+      className="fixed inset-0 w-full h-full bg-[#7cc0f0]"
     />
   );
 }

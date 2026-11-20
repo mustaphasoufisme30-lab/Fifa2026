@@ -249,7 +249,7 @@ export class OnlineRoomManager {
         return;
 
       case 'room:start':
-        this.handleStartMatch(clientId);
+        this.handleStartMatch(client, verifiedUid, msg);
         return;
 
       case 'match:input':
@@ -689,14 +689,39 @@ export class OnlineRoomManager {
     this.broadcastRoomState(room);
   }
 
-  private handleStartMatch(clientId: string): void {
-    const code = this.clientToRoom.get(clientId);
-    if (!code) return;
+  private handleStartMatch(
+    client: ClientTransport,
+    verifiedUid: string,
+    msg: Extract<ClientToServerMessage, { type: 'room:start' }>,
+  ): void {
+    let code = this.clientToRoom.get(client.id);
+    if (!code && msg.roomCode) {
+      this.handleReconnect(client, msg.roomCode, verifiedUid, msg.bootstrap);
+      code = this.clientToRoom.get(client.id);
+    }
+    if (!code) {
+      client.send({
+        type: 'room:error',
+        message: 'Salle non synchronisée avec le serveur temps réel.',
+      });
+      return;
+    }
+
     const room = this.rooms.get(code);
-    if (!room || room.status !== 'waiting') return;
+    if (!room) {
+      client.send({
+        type: 'room:error',
+        message: `Partie ${code} introuvable sur le serveur.`,
+      });
+      return;
+    }
+
+    if (room.status !== 'waiting') {
+      return;
+    }
 
     if (room.players.length < 2) {
-      this.clients.get(clientId)?.send({
+      client.send({
         type: 'room:error',
         message: 'En attente du deuxième joueur avant le coup d’envoi.',
       });
@@ -704,7 +729,7 @@ export class OnlineRoomManager {
     }
 
     if (room.players.some((p) => !p.connected)) {
-      this.clients.get(clientId)?.send({
+      client.send({
         type: 'room:error',
         message: 'En attente de la connexion temps réel du deuxième joueur...',
       });

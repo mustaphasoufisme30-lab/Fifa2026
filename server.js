@@ -3608,7 +3608,7 @@ var OnlineRoomManager = class {
         this.handleUpdateProfile(clientId, msg);
         return;
       case "room:start":
-        this.handleStartMatch(clientId);
+        this.handleStartMatch(client, verifiedUid, msg);
         return;
       case "match:input":
         this.handleMatchInput(clientId, msg.input);
@@ -3962,20 +3962,39 @@ var OnlineRoomManager = class {
     }
     this.broadcastRoomState(room);
   }
-  handleStartMatch(clientId) {
-    const code = this.clientToRoom.get(clientId);
-    if (!code) return;
+  handleStartMatch(client, verifiedUid, msg) {
+    let code = this.clientToRoom.get(client.id);
+    if (!code && msg.roomCode) {
+      this.handleReconnect(client, msg.roomCode, verifiedUid, msg.bootstrap);
+      code = this.clientToRoom.get(client.id);
+    }
+    if (!code) {
+      client.send({
+        type: "room:error",
+        message: "Salle non synchronis\xE9e avec le serveur temps r\xE9el."
+      });
+      return;
+    }
     const room = this.rooms.get(code);
-    if (!room || room.status !== "waiting") return;
+    if (!room) {
+      client.send({
+        type: "room:error",
+        message: `Partie ${code} introuvable sur le serveur.`
+      });
+      return;
+    }
+    if (room.status !== "waiting") {
+      return;
+    }
     if (room.players.length < 2) {
-      this.clients.get(clientId)?.send({
+      client.send({
         type: "room:error",
         message: "En attente du deuxi\xE8me joueur avant le coup d\u2019envoi."
       });
       return;
     }
     if (room.players.some((p) => !p.connected)) {
-      this.clients.get(clientId)?.send({
+      client.send({
         type: "room:error",
         message: "En attente de la connexion temps r\xE9el du deuxi\xE8me joueur..."
       });

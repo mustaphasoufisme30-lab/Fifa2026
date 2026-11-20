@@ -126,7 +126,7 @@ export type ClientToServerMessage =
       ready?: boolean;
       nickname?: string;
     }
-  | { type: 'room:start' }
+  | { type: 'room:start'; roomCode?: string; bootstrap?: RoomBootstrapData }
   | { type: 'match:input'; input: InputSnapshot }
   | { type: 'match:rematch' }
   | { type: 'ping'; clientTime: number };

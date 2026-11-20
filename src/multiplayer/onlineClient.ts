@@ -74,6 +74,10 @@ export class OnlineMultiplayerClient {
     return this.status;
   }
 
+  public isReady(): boolean {
+    return Boolean(this.ws && this.ws.readyState === WebSocket.OPEN && this.isAuthenticated);
+  }
+
   public reauthenticate(): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       if (this.shouldReconnect) {

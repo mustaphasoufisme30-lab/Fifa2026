@@ -33,30 +33,62 @@ function createPitchTexture(): THREE.CanvasTexture {
   const toPxX = (m: number) => padX + (m + HALF_LENGTH) * scaleX;
   const toPxZ = (m: number) => padY + (m + HALF_WIDTH) * scaleZ;
 
-  // Base apron grass
-  ctx.fillStyle = '#1f5b2c';
+  // Sunlit daytime outer grass apron (rich emerald-lime matching the main pitch)
+  ctx.fillStyle = '#3b7d1a';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Mowed grass stripes (18 bands across length)
+  // Broad vertical mowed grass stripes (18 bands across 105m length)
   const stripeCount = 18;
   const stripeW = fieldW / stripeCount;
   for (let i = 0; i < stripeCount; i++) {
-    ctx.fillStyle = i % 2 === 0 ? '#277438' : '#2e8441';
-    ctx.fillRect(padX + i * stripeW, padY - 12, stripeW + 1, fieldH + 24);
+    ctx.fillStyle = i % 2 === 0 ? '#40861b' : '#4f9c22';
+    ctx.fillRect(padX + i * stripeW, padY - 18, stripeW + 1, fieldH + 36);
   }
 
-  // Subtle organic turf grain
-  ctx.fillStyle = 'rgba(255,255,255,0.025)';
+  // Subtle horizontal cross-cut mowing bands for a natural stadium checkerboard pattern
+  const rowCount = 10;
+  const rowH = fieldH / rowCount;
+  for (let r = 0; r < rowCount; r++) {
+    ctx.fillStyle =
+      r % 2 === 0
+        ? 'rgba(198, 240, 86, 0.085)'
+        : 'rgba(18, 56, 8, 0.11)';
+    ctx.fillRect(padX - 18, padY + r * rowH, fieldW + 36, rowH + 0.5);
+  }
+
+  // Soft natural sunlight luminance variation across the pitch (prevents artificial flat look)
+  const sunGrad = ctx.createRadialGradient(
+    canvas.width * 0.52,
+    canvas.height * 0.46,
+    80,
+    canvas.width * 0.5,
+    canvas.height * 0.5,
+    canvas.width * 0.62,
+  );
+  sunGrad.addColorStop(0, 'rgba(248, 255, 195, 0.06)');
+  sunGrad.addColorStop(0.65, 'rgba(255, 255, 255, 0)');
+  sunGrad.addColorStop(1, 'rgba(14, 48, 8, 0.09)');
+  ctx.fillStyle = sunGrad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Subtle organic turf grain (deterministic light & dark blade micro-texture)
+  ctx.fillStyle = 'rgba(235, 255, 170, 0.04)';
   for (let i = 0; i < 4200; i++) {
-    const rx = (i * 197) % canvas.width;
-    const ry = (i * 313) % canvas.height;
+    const rx = (i * 197 + 23) % canvas.width;
+    const ry = (i * 313 + 11) % canvas.height;
+    ctx.fillRect(rx, ry, 2, 2);
+  }
+  ctx.fillStyle = 'rgba(16, 48, 8, 0.045)';
+  for (let i = 0; i < 3200; i++) {
+    const rx = (i * 263 + 71) % canvas.width;
+    const ry = (i * 419 + 47) % canvas.height;
     ctx.fillRect(rx, ry, 2, 2);
   }
 
-  // Crisp regulation white pitch lines
-  ctx.strokeStyle = 'rgba(248, 252, 255, 0.94)';
-  ctx.fillStyle = 'rgba(248, 252, 255, 0.94)';
-  ctx.lineWidth = 4;
+  // Crisp luminous regulation white pitch lines
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.96)';
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.96)';
+  ctx.lineWidth = 3.2;
 
   // Outer touchlines & goal lines
   ctx.strokeRect(padX, padY, fieldW, fieldH);
@@ -81,7 +113,7 @@ function createPitchTexture(): THREE.CanvasTexture {
   ctx.stroke();
 
   ctx.beginPath();
-  ctx.arc(toPxX(0), toPxZ(0), 6, 0, Math.PI * 2);
+  ctx.arc(toPxX(0), toPxZ(0), 5.5, 0, Math.PI * 2);
   ctx.fill();
 
   // Both penalty areas, goal areas, penalty spots, and arcs
@@ -111,7 +143,7 @@ function createPitchTexture(): THREE.CanvasTexture {
 
     // Penalty spot
     ctx.beginPath();
-    ctx.arc(toPxX(penSpotX), toPxZ(0), 5, 0, Math.PI * 2);
+    ctx.arc(toPxX(penSpotX), toPxZ(0), 4.8, 0, Math.PI * 2);
     ctx.fill();
 
     // Penalty arc (outside penalty box)
@@ -158,7 +190,7 @@ function createNetTexture(): THREE.CanvasTexture {
   canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
   ctx.clearRect(0, 0, 128, 128);
-  ctx.strokeStyle = 'rgba(241, 245, 249, 0.72)';
+  ctx.strokeStyle = 'rgba(248, 250, 252, 0.78)';
   ctx.lineWidth = 2.5;
   for (let i = 0; i <= 128; i += 16) {
     ctx.beginPath();
@@ -185,45 +217,81 @@ function createAdBoardTexture(): THREE.CanvasTexture {
   canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
 
-  const brands = [
-    { bg: '#0f172a', fg: '#38bdf8', text: 'FiFA 2026 CHAMPIONSHIP' },
-    { bg: '#0369a1', fg: '#ffffff', text: 'VELOX ATHLETICS' },
-    { bg: '#064e3b', fg: '#34d399', text: 'APEX TURF SYSTEMS' },
-    { bg: '#7c2d12', fg: '#fbbf24', text: 'SOLANO FINANCIAL' },
+  // Modern high-contrast crimson / magenta / black continuous stadium LED ribbon
+  const bgGrad = ctx.createLinearGradient(0, 0, canvas.width, 0);
+  bgGrad.addColorStop(0, '#9e0730');
+  bgGrad.addColorStop(0.25, '#c4093e');
+  bgGrad.addColorStop(0.5, '#8f062b');
+  bgGrad.addColorStop(0.75, '#c4093e');
+  bgGrad.addColorStop(1, '#9e0730');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const panels = [
+    { labelTop: 'FOOTBALL', labelBottom: 'LEAGUE', num: '26' },
+    { labelTop: 'PRO CUP', labelBottom: 'SERIES', num: '26' },
+    { labelTop: 'FOOTBALL', labelBottom: 'LEAGUE', num: '26' },
+    { labelTop: 'WORLD', labelBottom: 'ARENA', num: '26' },
   ];
 
-  const segW = canvas.width / brands.length;
-  brands.forEach((b, i) => {
-    ctx.fillStyle = b.bg;
-    ctx.fillRect(i * segW, 0, segW, canvas.height);
-    ctx.fillStyle = b.fg;
-    ctx.font = 'bold 24px sans-serif';
+  const segW = canvas.width / panels.length;
+  panels.forEach((p, i) => {
+    const x0 = i * segW;
+
+    // Sleek dark obsidian diagonal slash divider at left of each LED panel
+    ctx.fillStyle = '#0c050c';
+    ctx.beginPath();
+    ctx.moveTo(x0, 0);
+    ctx.lineTo(x0 + 34, 0);
+    ctx.lineTo(x0 + 14, canvas.height);
+    ctx.lineTo(x0 - 20, canvas.height);
+    ctx.closePath();
+    ctx.fill();
+
+    // Crisp magenta accent line along top & obsidian base strip along bottom
+    ctx.fillStyle = '#e11d5a';
+    ctx.fillRect(x0 + 34, 0, segW - 34, 6);
+    ctx.fillStyle = '#12060e';
+    ctx.fillRect(x0, canvas.height - 9, segW, 9);
+
+    // Stylized emblem badge
+    const badgeX = x0 + 56;
+    const badgeY = 62;
+    ctx.fillStyle = '#0c050c';
+    ctx.beginPath();
+    ctx.arc(badgeX, badgeY, 22, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#f43f74';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '900 18px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(b.text, i * segW + segW / 2, 64);
+    ctx.fillText('FL', badgeX, badgeY + 1);
+
+    // Stacked modern typography
+    ctx.fillStyle = '#0d040b';
+    ctx.font = '900 22px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(p.labelTop, x0 + 88, 46);
+    ctx.fillStyle = '#140610';
+    ctx.font = '800 20px sans-serif';
+    ctx.fillText(p.labelBottom, x0 + 88, 76);
+
+    // Bold edition number
+    ctx.fillStyle = '#090308';
+    ctx.font = '900 56px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(p.num, x0 + segW - 18, 66);
   });
 
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
-  tex.repeat.set(4, 1);
-  return tex;
-}
-
-function createFloodlightHaloTexture(): THREE.CanvasTexture {
-  const canvas = document.createElement('canvas');
-  canvas.width = 128;
-  canvas.height = 128;
-  const ctx = canvas.getContext('2d')!;
-  const grad = ctx.createRadialGradient(64, 64, 4, 64, 64, 62);
-  grad.addColorStop(0, 'rgba(255, 250, 232, 0.85)');
-  grad.addColorStop(0.35, 'rgba(220, 238, 255, 0.28)');
-  grad.addColorStop(1, 'rgba(220, 238, 255, 0)');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, 128, 128);
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.repeat.set(5, 1);
   return tex;
 }
 
@@ -242,12 +310,12 @@ export function buildStadium(
   const disposables: Array<{ dispose: () => void }> = [];
   const flagCloths: THREE.Mesh[] = [];
 
-  // 1. Surrounding stadium ground apron (y = -0.025)
-  const apronGeo = new THREE.PlaneGeometry(170, 128);
+  // 1. Surrounding stadium ground apron (rich sunlit turf border, y = -0.025)
+  const apronGeo = new THREE.PlaneGeometry(180, 136);
   const apronMat = new THREE.MeshStandardMaterial({
-    color: 0x162638,
-    roughness: 0.9,
-    metalness: 0.05,
+    color: 0x346b17,
+    roughness: 0.94,
+    metalness: 0.0,
   });
   const apron = new THREE.Mesh(apronGeo, apronMat);
   apron.rotation.x = -Math.PI / 2;
@@ -265,7 +333,7 @@ export function buildStadium(
   const pitchMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     map: pitchTex,
-    roughness: 0.88,
+    roughness: 0.92,
     metalness: 0.0,
   });
   const pitchMesh = new THREE.Mesh(pitchGeo, pitchMat);
@@ -419,28 +487,28 @@ export function buildStadium(
     }
   }
 
-  // 4b. Two Composite Technical Dugouts along North Touchline
+  // 4b. Two Composite Technical Dugouts tucked behind the North LED Ribbon
   const dugoutFrameMat = new THREE.MeshStandardMaterial({
-    color: 0x1e293b,
+    color: 0x334155,
     roughness: 0.45,
-    metalness: 0.45,
+    metalness: 0.35,
   });
   const dugoutGlassMat = new THREE.MeshStandardMaterial({
-    color: 0x93c5fd,
+    color: 0xcbe6ff,
     roughness: 0.2,
     metalness: 0.1,
     transparent: true,
-    opacity: 0.35,
+    opacity: 0.32,
   });
   const dugoutSeatMat = new THREE.MeshStandardMaterial({
-    color: 0x0f172a,
+    color: 0x1e293b,
     roughness: 0.7,
     metalness: 0.1,
   });
-  const dugoutRoofGeo = new THREE.BoxGeometry(8.4, 0.16, 2.3);
-  const dugoutBackGeo = new THREE.BoxGeometry(8.4, 1.9, 0.12);
-  const dugoutSideGeo = new THREE.BoxGeometry(0.12, 1.9, 2.2);
-  const dugoutBenchGeo = new THREE.BoxGeometry(7.6, 0.46, 0.65);
+  const dugoutRoofGeo = new THREE.BoxGeometry(8.4, 0.14, 2.2);
+  const dugoutBackGeo = new THREE.BoxGeometry(8.4, 1.75, 0.12);
+  const dugoutSideGeo = new THREE.BoxGeometry(0.12, 1.75, 2.1);
+  const dugoutBenchGeo = new THREE.BoxGeometry(7.6, 0.44, 0.62);
   disposables.push(
     dugoutFrameMat,
     dugoutGlassMat,
@@ -451,81 +519,87 @@ export function buildStadium(
     dugoutBenchGeo,
   );
 
-  for (const dx of [-13.5, 13.5] as const) {
+  for (const dx of [-16.5, 16.5] as const) {
     const dugout = new THREE.Group();
-    dugout.position.set(dx, 0, -HALF_WIDTH - 2.65);
+    dugout.position.set(dx, 0, -HALF_WIDTH - 6.6);
 
     const roof = new THREE.Mesh(dugoutRoofGeo, dugoutFrameMat);
-    roof.position.set(0, 2.05, 0);
+    roof.position.set(0, 1.78, 0);
     roof.rotation.x = 0.08;
     dugout.add(roof);
 
     const backWall = new THREE.Mesh(dugoutBackGeo, dugoutGlassMat);
-    backWall.position.set(0, 1.0, -1.05);
+    backWall.position.set(0, 0.86, -1.0);
     dugout.add(backWall);
 
     const leftWall = new THREE.Mesh(dugoutSideGeo, dugoutGlassMat);
-    leftWall.position.set(-4.14, 1.0, 0);
+    leftWall.position.set(-4.14, 0.86, 0);
     dugout.add(leftWall);
 
     const rightWall = new THREE.Mesh(dugoutSideGeo, dugoutGlassMat);
-    rightWall.position.set(4.14, 1.0, 0);
+    rightWall.position.set(4.14, 0.86, 0);
     dugout.add(rightWall);
 
     const bench = new THREE.Mesh(dugoutBenchGeo, dugoutSeatMat);
-    bench.position.set(0, 0.36, -0.42);
+    bench.position.set(0, 0.34, -0.4);
     dugout.add(bench);
 
     group.add(dugout);
   }
 
-  // 5. Perimeter Advertising Boards (with subtle goal-celebration LED pulse)
+  // 5. Continuous Perimeter LED Advertising Ribbon (crimson / magenta / black)
   const adTex = createAdBoardTexture();
   adTex.anisotropy = maxAnisotropy;
   const adMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     map: adTex,
-    emissive: new THREE.Color(0x1e3a5f),
+    emissive: new THREE.Color(0xffffff),
     emissiveMap: adTex,
-    emissiveIntensity: 0.16,
-    roughness: 0.45,
-    metalness: 0.1,
+    emissiveIntensity: 0.28,
+    roughness: 0.42,
+    metalness: 0.06,
   });
-  const adLongGeo = new THREE.BoxGeometry(PITCH_LENGTH + 8, 1.05, 0.35);
-  const adShortGeo = new THREE.BoxGeometry(0.35, 1.05, PITCH_WIDTH + 6);
+  const adLongGeo = new THREE.BoxGeometry(PITCH_LENGTH + 11.5, 1.32, 0.34);
+  const adShortGeo = new THREE.BoxGeometry(0.34, 1.32, PITCH_WIDTH + 6.4);
   disposables.push(adTex, adMat, adLongGeo, adShortGeo);
 
   for (const sz of [-1, 1] as const) {
     const board = new THREE.Mesh(adLongGeo, adMat);
-    board.position.set(0, 0.52, sz * (HALF_WIDTH + 4.8));
+    // Front face at HALF_WIDTH + 2.88 keeps players (clamped at +2.8) clear while staying right behind touchline
+    board.position.set(0, 0.66, sz * (HALF_WIDTH + 3.05));
     group.add(board);
   }
   for (const sx of [-1, 1] as const) {
     const board = new THREE.Mesh(adShortGeo, adMat);
-    board.position.set(sx * (HALF_LENGTH + 5.6), 0.52, 0);
+    board.position.set(sx * (HALF_LENGTH + 5.6), 0.66, 0);
     group.add(board);
   }
 
-  // 6. Tiered Stadium Stands & Spectators (InstancedMesh for crisp mobile performance)
+  // 6. Tiered Daytime Stadium Stands & Spectators (secondary visual backdrop, InstancedMesh for mobile)
   const standMat = new THREE.MeshStandardMaterial({
-    color: 0x334155,
-    roughness: 0.78,
-    metalness: 0.12,
+    color: 0xb6c3cf,
+    roughness: 0.82,
+    metalness: 0.05,
   });
   const roofMat = new THREE.MeshStandardMaterial({
-    color: 0x0f172a,
-    roughness: 0.65,
-    metalness: 0.35,
+    color: 0xdce6f0,
+    roughness: 0.62,
+    metalness: 0.22,
   });
-  disposables.push(standMat, roofMat);
+  const towerMat = new THREE.MeshStandardMaterial({
+    color: 0xc2ced9,
+    roughness: 0.55,
+    metalness: 0.3,
+  });
+  disposables.push(standMat, roofMat, towerMat);
 
   const standConfigs = [
-    // North & South grandstands
-    { w: 124, h: 11, d: 13, x: 0, z: -HALF_WIDTH - 12.2, rotY: 0 },
-    { w: 124, h: 11, d: 13, x: 0, z: HALF_WIDTH + 13.5, rotY: Math.PI },
+    // North & South grandstands pushed back slightly so pitch + LED boards dominate gameplay framing
+    { w: 128, h: 9.6, d: 13, x: 0, z: -HALF_WIDTH - 14.2, rotY: 0 },
+    { w: 128, h: 9.6, d: 13, x: 0, z: HALF_WIDTH + 15.0, rotY: Math.PI },
     // East & West behind-goal stands
-    { w: 78, h: 10, d: 12, x: -HALF_LENGTH - 13.2, z: 0, rotY: Math.PI / 2 },
-    { w: 78, h: 10, d: 12, x: HALF_LENGTH + 13.2, z: 0, rotY: -Math.PI / 2 },
+    { w: 80, h: 9.2, d: 12, x: -HALF_LENGTH - 14.0, z: 0, rotY: Math.PI / 2 },
+    { w: 80, h: 9.2, d: 12, x: HALF_LENGTH + 14.0, z: 0, rotY: -Math.PI / 2 },
   ];
 
   for (const sc of standConfigs) {
@@ -548,10 +622,10 @@ export function buildStadium(
     }
 
     // Overhanging stadium canopy roof
-    const canopyGeo = new THREE.BoxGeometry(sc.w + 4, 0.7, sc.d * 0.95);
+    const canopyGeo = new THREE.BoxGeometry(sc.w + 4, 0.65, sc.d * 0.92);
     disposables.push(canopyGeo);
     const canopy = new THREE.Mesh(canopyGeo, roofMat);
-    canopy.position.set(0, sc.h + 2.5, -sc.d * 0.1);
+    canopy.position.set(0, sc.h + 2.3, -sc.d * 0.12);
     canopy.rotation.x = 0.08;
     standGroup.add(canopy);
 
@@ -565,7 +639,7 @@ export function buildStadium(
   const specGeo = new THREE.BoxGeometry(0.55, 0.92, 0.42);
   const specMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
-    roughness: 0.75,
+    roughness: 0.78,
   });
   disposables.push(specGeo, specMat);
 
@@ -579,21 +653,21 @@ export function buildStadium(
     const tier = i % 3;
     if (section === 0) {
       // North stand: tier 0 is front (+z toward pitch), tier 2 is back (-z)
-      const x = ((i * 13.7) % 116) - 58;
-      const z = -HALF_WIDTH - 8.2 - tier * 4.2;
-      const y = 3.7 + tier * 3.3;
+      const x = ((i * 13.7) % 118) - 59;
+      const z = -HALF_WIDTH - 10.2 - tier * 4.2;
+      const y = 3.3 + tier * 2.9;
       dummy.position.set(x, y, z);
     } else if (section === 1) {
       // West stand
-      const z = ((i * 11.3) % 70) - 35;
-      const x = -HALF_LENGTH - 9.4 - tier * 3.9;
-      const y = 3.4 + tier * 3.0;
+      const z = ((i * 11.3) % 72) - 36;
+      const x = -HALF_LENGTH - 10.2 - tier * 3.9;
+      const y = 3.2 + tier * 2.75;
       dummy.position.set(x, y, z);
     } else {
       // East stand
-      const z = ((i * 17.1) % 70) - 35;
-      const x = HALF_LENGTH + 9.4 + tier * 3.9;
-      const y = 3.4 + tier * 3.0;
+      const z = ((i * 17.1) % 72) - 36;
+      const x = HALF_LENGTH + 10.2 + tier * 3.9;
+      const y = 3.2 + tier * 2.75;
       dummy.position.set(x, y, z);
     }
 
@@ -611,40 +685,29 @@ export function buildStadium(
   crowdInstanced.computeBoundingSphere();
   group.add(crowdInstanced);
 
-  // 7. Four Stadium Floodlight Towers with Soft Atmospheric Glow Halos
-  const towerPoleGeo = new THREE.CylinderGeometry(0.45, 0.75, 29, 8);
-  const towerHeadGeo = new THREE.BoxGeometry(5.6, 2.8, 0.8);
-  const towerBulbMat = new THREE.MeshBasicMaterial({ color: 0xfff8e7 });
-  const haloTex = createFloodlightHaloTexture();
-  const haloGeo = new THREE.PlaneGeometry(16, 16);
-  const haloMat = new THREE.MeshBasicMaterial({
-    map: haloTex,
-    transparent: true,
-    opacity: 0.42,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    side: THREE.DoubleSide,
+  // 7. Four Daytime Stadium Light Masts (no night-time additive glow halos)
+  const towerPoleGeo = new THREE.CylinderGeometry(0.42, 0.7, 27, 8);
+  const towerHeadGeo = new THREE.BoxGeometry(5.2, 2.4, 0.75);
+  const towerFaceMat = new THREE.MeshStandardMaterial({
+    color: 0xf1f5f9,
+    roughness: 0.4,
+    metalness: 0.25,
   });
-  disposables.push(towerPoleGeo, towerHeadGeo, towerBulbMat, haloTex, haloGeo, haloMat);
+  disposables.push(towerPoleGeo, towerHeadGeo, towerFaceMat);
 
   for (const sx of [-1, 1] as const) {
     for (const sz of [-1, 1] as const) {
-      const tx = sx * (HALF_LENGTH + 20);
-      const tz = sz * (HALF_WIDTH + 19);
+      const tx = sx * (HALF_LENGTH + 21);
+      const tz = sz * (HALF_WIDTH + 20);
 
-      const tower = new THREE.Mesh(towerPoleGeo, roofMat);
-      tower.position.set(tx, 14.5, tz);
+      const tower = new THREE.Mesh(towerPoleGeo, towerMat);
+      tower.position.set(tx, 13.5, tz);
       group.add(tower);
 
-      const head = new THREE.Mesh(towerHeadGeo, towerBulbMat);
-      head.position.set(tx, 29.5, tz);
+      const head = new THREE.Mesh(towerHeadGeo, towerFaceMat);
+      head.position.set(tx, 27.4, tz);
       head.lookAt(0, 0, 0);
       group.add(head);
-
-      const halo = new THREE.Mesh(haloGeo, haloMat);
-      halo.position.set(tx - sx * 0.8, 29.2, tz - sz * 0.8);
-      halo.lookAt(0, 4, 0);
-      group.add(halo);
     }
   }
 
@@ -656,14 +719,14 @@ export function buildStadium(
         flagCloths[i].rotation.y = Math.sin(elapsed * 5.0 + i * 1.3) * 0.28;
       }
 
-      // Dynamic LED ad-board glow pulse during goal celebrations
+      // Dynamic LED ad-board highlight pulse during goal celebrations
       if (isGoalCelebration) {
-        const pulse = 0.42 + Math.sin(elapsed * 12) * 0.26;
-        adMat.emissive.setHex(0xf59e0b);
+        const pulse = 0.48 + Math.sin(elapsed * 12) * 0.24;
+        adMat.emissive.setHex(0xffe082);
         adMat.emissiveIntensity = pulse;
       } else {
-        adMat.emissive.setHex(0x1e3a5f);
-        adMat.emissiveIntensity = 0.16;
+        adMat.emissive.setHex(0xffffff);
+        adMat.emissiveIntensity = 0.28;
       }
     },
     setQuality: (nextQuality: QualityLevel) => {

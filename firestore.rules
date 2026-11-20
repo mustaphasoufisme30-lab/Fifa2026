@@ -277,6 +277,95 @@ service cloud.firestore {
       allow delete: if isSignedIn() &&
         existing().hostUid == request.auth.uid &&
         existing().status == 'waiting';
+
+      // =======================================================================
+      // Subcollection: /rooms/{roomCode}/live/{channel}
+      // Real-time fallback sync when WebSocket instances are separated/unavailable.
+      // Only verified room participants can access; host owns state, guest owns input.
+      // =======================================================================
+      match /live/{channel} {
+        function parentRoomExists() {
+          return exists(/databases/$(database)/documents/rooms/$(roomCode));
+        }
+
+        function parentRoom() {
+          return get(/databases/$(database)/documents/rooms/$(roomCode)).data;
+        }
+
+        function isValidLiveState(data) {
+          let allowedKeys = ['tick', 'seq', 'payload', 'updatedAt'];
+          return data.keys().hasAll(allowedKeys) &&
+            data.keys().hasOnly(allowedKeys) &&
+            data.tick is int && data.tick >= 0 && data.tick <= 1000000 &&
+            data.seq is int && data.seq >= 0 && data.seq <= 1000000 &&
+            data.payload is string && data.payload.size() >= 2 && data.payload.size() <= 40000 &&
+            data.updatedAt == request.time;
+        }
+
+        function isValidGuestInput(data) {
+          let allowedKeys = [
+            'seq',
+            'moveX',
+            'moveZ',
+            'sprint',
+            'passPressed',
+            'lobPressed',
+            'shootPressed',
+            'shootHeld',
+            'shootReleased',
+            'tacklePressed',
+            'switchPressed',
+            'updatedAt'
+          ];
+          return data.keys().hasAll(allowedKeys) &&
+            data.keys().hasOnly(allowedKeys) &&
+            data.seq is int && data.seq >= 0 && data.seq <= 1000000 &&
+            data.moveX is number && data.moveX >= -1 && data.moveX <= 1 &&
+            data.moveZ is number && data.moveZ >= -1 && data.moveZ <= 1 &&
+            data.sprint is bool &&
+            data.passPressed is bool &&
+            data.lobPressed is bool &&
+            data.shootPressed is bool &&
+            data.shootHeld is bool &&
+            data.shootReleased is bool &&
+            data.tacklePressed is bool &&
+            data.switchPressed is bool &&
+            data.updatedAt == request.time;
+        }
+
+        function isValidRematch(data) {
+          let allowedKeys = ['rematchCount', 'requestedBy', 'updatedAt'];
+          return data.keys().hasAll(allowedKeys) &&
+            data.keys().hasOnly(allowedKeys) &&
+            data.rematchCount is int && data.rematchCount >= 1 && data.rematchCount <= 100 &&
+            data.requestedBy == request.auth.uid &&
+            data.updatedAt == request.time;
+        }
+
+        allow get: if isSignedIn() &&
+          parentRoomExists() &&
+          (parentRoom().hostUid == request.auth.uid ||
+           parentRoom().guestUid == request.auth.uid);
+
+        allow list: if false;
+
+        allow create, update: if isSignedIn() &&
+          parentRoomExists() &&
+          (
+            (channel == 'state' &&
+             parentRoom().hostUid == request.auth.uid &&
+             isValidLiveState(incoming())) ||
+            (channel == 'guestInput' &&
+             parentRoom().guestUid == request.auth.uid &&
+             isValidGuestInput(incoming())) ||
+            (channel == 'rematch' &&
+             (parentRoom().hostUid == request.auth.uid ||
+              parentRoom().guestUid == request.auth.uid) &&
+             isValidRematch(incoming()))
+          );
+
+        allow delete: if false;
+      }
     }
 
     // Default deny catch-all

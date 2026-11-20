@@ -2,10 +2,13 @@ import * as THREE from 'three';
 import { CameraMode, GameShellState, Vec3 } from '../core/types';
 
 export class CameraController {
-  private readonly currentPos = new THREE.Vector3(0, 26, 36);
-  private readonly currentLook = new THREE.Vector3(0, 0, 0);
+  private readonly currentPos = new THREE.Vector3(0, 16.4, 22.6);
+  private readonly currentLook = new THREE.Vector3(0, 0.35, 0.15);
   private readonly targetPos = new THREE.Vector3();
   private readonly targetLook = new THREE.Vector3();
+  private readonly prevFocus = new THREE.Vector3(0, 0, 0);
+  private readonly leadOffset = new THREE.Vector3(0, 0, 0);
+  private hasPrevFocus = false;
   private trauma = 0;
   private flyoverAngle = 0;
   private replayOrbitAngle = 0;
@@ -15,30 +18,54 @@ export class CameraController {
   }
 
   public snapToGameplay(ballPos: Vec3, mode: CameraMode): void {
-    this.computeGameplayTargets(ballPos, null, mode);
+    this.hasPrevFocus = false;
+    this.leadOffset.set(0, 0, 0);
+    this.computeGameplayTargets(ballPos, null, mode, 0);
     this.currentPos.copy(this.targetPos);
     this.currentLook.copy(this.targetLook);
+  }
+
+  private getTargetFov(shellState: GameShellState, mode: CameraMode, isGoalCelebration: boolean): number {
+    if (shellState === 'title' || shellState === 'tournament') return 45;
+    const effectiveMode: CameraMode = isGoalCelebration ? 'replay' : mode;
+    if (effectiveMode === 'tv') return 42;
+    if (effectiveMode === 'close') return 40;
+    if (effectiveMode === 'player') return 50;
+    return 44;
   }
 
   private computeGameplayTargets(
     ballPos: Vec3,
     controlledPos: Vec3 | null,
     mode: CameraMode,
+    dt: number,
   ): void {
-    const focusX = controlledPos ? ballPos.x * 0.65 + controlledPos.x * 0.35 : ballPos.x;
-    const focusZ = controlledPos ? ballPos.z * 0.65 + controlledPos.z * 0.35 : ballPos.z;
+    const focusX = controlledPos ? ballPos.x * 0.62 + controlledPos.x * 0.38 : ballPos.x;
+    const focusZ = controlledPos ? ballPos.z * 0.62 + controlledPos.z * 0.38 : ballPos.z;
+
+    // Smooth velocity-based anticipation ahead of the play
+    if (dt > 0.0001 && this.hasPrevFocus) {
+      const vx = THREE.MathUtils.clamp((focusX - this.prevFocus.x) / dt, -14, 14);
+      const vz = THREE.MathUtils.clamp((focusZ - this.prevFocus.z) / dt, -10, 10);
+      const desiredLeadX = THREE.MathUtils.clamp(vx * 0.24, -3.4, 3.4);
+      const desiredLeadZ = THREE.MathUtils.clamp(vz * 0.12, -1.4, 1.4);
+      this.leadOffset.x = THREE.MathUtils.damp(this.leadOffset.x, desiredLeadX, 3.2, dt);
+      this.leadOffset.z = THREE.MathUtils.damp(this.leadOffset.z, desiredLeadZ, 3.2, dt);
+    }
+    this.prevFocus.set(focusX, 0, focusZ);
+    this.hasPrevFocus = true;
 
     if (mode === 'tv') {
-      // Classic broadcast TV camera angled from the southern touchline (+Z) looking across pitch
-      const clampedX = THREE.MathUtils.clamp(focusX * 0.78, -36, 36);
-      const clampedZ = THREE.MathUtils.clamp(focusZ * 0.45, -15, 15);
-      this.targetPos.set(clampedX, 23.5, clampedZ + 34.5);
-      this.targetLook.set(clampedX * 1.06, 0.5, clampedZ * 0.85);
+      // Broadcast Mobile / closer TV angle keeping pitch dominant and far LED boards flush near top edge
+      const clampedX = THREE.MathUtils.clamp(focusX * 0.86 + this.leadOffset.x, -39, 39);
+      const clampedZ = THREE.MathUtils.clamp(focusZ * 0.56 + this.leadOffset.z * 0.6, -12.0, 16.5);
+      this.targetPos.set(clampedX, 16.4, clampedZ + 22.6);
+      this.targetLook.set(clampedX + this.leadOffset.x * 0.25, 0.35, clampedZ + 0.15);
     } else if (mode === 'close') {
-      const clampedX = THREE.MathUtils.clamp(focusX * 0.9, -46, 46);
-      const clampedZ = THREE.MathUtils.clamp(focusZ * 0.68, -24, 24);
-      this.targetPos.set(clampedX, 13.5, clampedZ + 20.5);
-      this.targetLook.set(focusX, 0.8, focusZ);
+      const clampedX = THREE.MathUtils.clamp(focusX * 0.92 + this.leadOffset.x * 0.8, -46, 46);
+      const clampedZ = THREE.MathUtils.clamp(focusZ * 0.72 + this.leadOffset.z * 0.5, -21, 22);
+      this.targetPos.set(clampedX, 12.2, clampedZ + 18.0);
+      this.targetLook.set(focusX + this.leadOffset.x * 0.3, 0.65, focusZ);
     } else if (mode === 'player') {
       const anchor = controlledPos ?? ballPos;
       // Behind-the-shoulder action view looking toward +X attack direction
@@ -82,7 +109,7 @@ export class CameraController {
       if (effectiveMode === 'replay') {
         this.replayOrbitAngle += dt * 0.55;
       }
-      this.computeGameplayTargets(ballPos, controlledPos, effectiveMode);
+      this.computeGameplayTargets(ballPos, controlledPos, effectiveMode, dt);
     }
 
     const posLambda = shellState === 'title' ? 3.5 : isGoalCelebration ? 4.8 : 6.2;
@@ -95,6 +122,13 @@ export class CameraController {
     this.currentLook.x = THREE.MathUtils.damp(this.currentLook.x, this.targetLook.x, lookLambda, dt);
     this.currentLook.y = THREE.MathUtils.damp(this.currentLook.y, this.targetLook.y, lookLambda, dt);
     this.currentLook.z = THREE.MathUtils.damp(this.currentLook.z, this.targetLook.z, lookLambda, dt);
+
+    const targetFov = this.getTargetFov(shellState, mode, isGoalCelebration);
+    const nextFov = THREE.MathUtils.damp(camera.fov, targetFov, 5.5, dt);
+    if (Math.abs(nextFov - camera.fov) > 0.01) {
+      camera.fov = nextFov;
+      camera.updateProjectionMatrix();
+    }
 
     camera.position.copy(this.currentPos);
 

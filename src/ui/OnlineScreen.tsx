@@ -512,6 +512,15 @@ export function OnlineScreen({
             </div>
 
             {/* Lobby Action Buttons */}
+            {roomError && (
+              <div
+                role="alert"
+                className="p-3 rounded-md bg-rose-950/85 border border-rose-500/60 text-xs text-rose-200"
+              >
+                {roomError}
+              </div>
+            )}
+
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2 border-t border-white/10">
               <button
                 type="button"
@@ -543,7 +552,11 @@ export function OnlineScreen({
                 >
                   <Play className="w-4 h-4 fill-slate-950" />
                   <span>
-                    {room.players.length < 2 ? 'En attente du Joueur 2...' : 'LANCER LE MATCH'}
+                    {busy
+                      ? 'Lancement...'
+                      : room.players.length < 2
+                        ? 'En attente du Joueur 2...'
+                        : 'LANCER LE MATCH'}
                   </span>
                 </button>
               </div>

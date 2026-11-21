@@ -196,6 +196,221 @@ function computeShotProfile(shotPower, charge, isSprinting) {
   const loftSpeed = 2.6 + clamped * 5.2;
   return { horizontalSpeed, loftSpeed };
 }
+function computeContextualShot(shooter, targetGoalX, aimZ, charge, allPlayers, isSprinting, noiseX, noiseY) {
+  const clampedCharge = Math.max(0, Math.min(1, charge));
+  const rawDirX = targetGoalX - shooter.position.x;
+  const rawDirZ = aimZ - shooter.position.z;
+  const distToGoal = Math.hypot(rawDirX, rawDirZ) || 1;
+  const goalNx = rawDirX / distToGoal;
+  const goalNz = rawDirZ / distToGoal;
+  const facingX = Math.sin(shooter.facingAngle);
+  const facingZ = Math.cos(shooter.facingAngle);
+  const bodyAlign = facingX * goalNx + facingZ * goalNz;
+  const alignFactor = Math.max(0, Math.min(1, (bodyAlign + 0.25) / 1.25));
+  const speed = Math.hypot(shooter.velocity.x, shooter.velocity.z);
+  const speedRatio = Math.min(1, speed / 9.5);
+  let pressureLevel = 0;
+  for (let i = 0; i < allPlayers.length; i++) {
+    const opp = allPlayers[i];
+    if (opp.team === shooter.team) continue;
+    const dx = opp.position.x - shooter.position.x;
+    const dz = opp.position.z - shooter.position.z;
+    const d = Math.hypot(dx, dz);
+    if (d < 3) {
+      const frontDot = d > 0.01 ? dx / d * goalNx + dz / d * goalNz : 0.5;
+      const weight = frontDot > -0.25 ? 1 : 0.55;
+      const contrib = (3 - d) / 3 * weight;
+      if (contrib > pressureLevel) pressureLevel = contrib;
+    }
+  }
+  pressureLevel = Math.min(1, pressureLevel);
+  let shotKind = "controlled";
+  if (pressureLevel >= 0.48) {
+    shotKind = "pressured";
+  } else if (clampedCharge >= 0.72) {
+    shotKind = "power";
+  } else if (clampedCharge <= 0.28) {
+    shotKind = "quick";
+  } else if (isSprinting || speed > 6.2) {
+    shotKind = "moving";
+  }
+  const baseProfile = computeShotProfile(shooter.attributes.shotPower, clampedCharge, isSprinting);
+  const bodyPowerMult = 0.8 + alignFactor * 0.22;
+  let horizontalSpeed = baseProfile.horizontalSpeed * bodyPowerMult;
+  let loftSpeed = baseProfile.loftSpeed;
+  if (shotKind === "quick") {
+    horizontalSpeed *= 0.94;
+    loftSpeed = Math.max(1.6, loftSpeed * 0.72);
+  } else if (shotKind === "power") {
+    horizontalSpeed *= 1.06;
+    loftSpeed += 0.95;
+  } else if (shotKind === "pressured") {
+    horizontalSpeed *= 0.96;
+    loftSpeed += pressureLevel * 1.15;
+  }
+  if (distToGoal > 22) {
+    loftSpeed += Math.min(1.6, (distToGoal - 22) * 0.075);
+  }
+  const overchargePenalty = clampedCharge > 0.78 ? (clampedCharge - 0.78) * 1.35 : 0;
+  const distPenalty = Math.max(0, (distToGoal - 14) / 38) * 0.22;
+  const accuracyFactor = Math.max(
+    0.18,
+    Math.min(
+      0.95,
+      0.92 - (1 - alignFactor) * 0.34 - speedRatio * 0.16 - pressureLevel * 0.28 - overchargePenalty - distPenalty
+    )
+  );
+  const maxAngleError = (1 - accuracyFactor) * 0.26;
+  const rx = noiseX !== void 0 ? Math.max(-1, Math.min(1, noiseX)) : (Math.random() - 0.5) * 2;
+  const ry = noiseY !== void 0 ? Math.max(-1, Math.min(1, noiseY)) : (Math.random() - 0.5) * 2;
+  const angleOffset = rx * maxAngleError;
+  const cosA = Math.cos(angleOffset);
+  const sinA = Math.sin(angleOffset);
+  const finalDirX = goalNx * cosA - goalNz * sinA;
+  const finalDirZ = goalNx * sinA + goalNz * cosA;
+  loftSpeed = Math.max(1.4, loftSpeed + ry * (1 - accuracyFactor) * 1.6);
+  const sideSpin = Math.abs(aimZ) > 0.35 ? Math.sign(aimZ) * (0.9 + alignFactor * 0.75) : 0;
+  return {
+    dirX: finalDirX,
+    dirZ: finalDirZ,
+    horizontalSpeed,
+    loftSpeed,
+    sideSpin,
+    shotKind,
+    accuracyFactor,
+    pressureLevel
+  };
+}
+function stepPlayerLocomotion(player, desiredVx, desiredVz, desiredAngle, dt, isSprinting, hasBall) {
+  const curVx = player.velocity.x;
+  const curVz = player.velocity.z;
+  const curSpeed = Math.hypot(curVx, curVz);
+  const desiredSpeed = Math.hypot(desiredVx, desiredVz);
+  let isTurningHard = false;
+  let effectiveAccel;
+  if (desiredSpeed < 0.15) {
+    effectiveAccel = 8.2 + player.attributes.dribbling / 100 * 1.8;
+  } else {
+    let moveDot = 1;
+    if (curSpeed > 1.2) {
+      moveDot = (curVx * desiredVx + curVz * desiredVz) / (curSpeed * desiredSpeed);
+    }
+    const baseAccel = Math.max(7.5, player.attributes.acceleration * 0.58);
+    if (curSpeed > 4.2 && moveDot < 0.25) {
+      isTurningHard = true;
+      const agilityBonus = player.attributes.dribbling / 100 * 1.6;
+      const brakeStrength = moveDot < -0.45 ? 0.46 : 0.62;
+      effectiveAccel = (baseAccel * brakeStrength + agilityBonus) * (hasBall ? 0.9 : 1);
+    } else if (desiredSpeed > curSpeed) {
+      effectiveAccel = baseAccel * (isSprinting ? 0.92 : 1.05);
+    } else {
+      effectiveAccel = baseAccel * 0.88;
+    }
+  }
+  const blend = Math.min(1, effectiveAccel * dt);
+  player.velocity.x = curVx + (desiredVx - curVx) * blend;
+  player.velocity.z = curVz + (desiredVz - curVz) * blend;
+  if (isTurningHard && curSpeed > 5) {
+    const cornerDrag = Math.pow(0.965, dt * 60);
+    player.velocity.x *= cornerDrag;
+    player.velocity.z *= cornerDrag;
+  }
+  const newSpeed = Math.hypot(player.velocity.x, player.velocity.z);
+  if (desiredAngle !== null) {
+    const speedNorm = Math.min(1, newSpeed / 10);
+    const baseTurnRate = hasBall ? 10.5 + player.attributes.dribbling / 100 * 3.5 : 12;
+    const speedTurnScale = 1 - speedNorm * (isSprinting ? 0.46 : 0.3);
+    const turnRate = Math.max(5.2, baseTurnRate * speedTurnScale);
+    let diff = desiredAngle - player.facingAngle;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    player.facingAngle += diff * Math.min(1, turnRate * dt);
+  }
+  return { speed: newSpeed, isTurningHard };
+}
+function evaluateBallReception(player, ball, inputDirX = 0, inputDirZ = 0) {
+  const ballSpeed = Math.hypot(ball.velocity.x, ball.velocity.z);
+  const playerSpeed = Math.hypot(player.velocity.x, player.velocity.z);
+  const isSprinting = player.actionState === "sprint" || playerSpeed > 7.4;
+  const inLen = Math.hypot(inputDirX, inputDirZ);
+  let touchDirX;
+  let touchDirZ;
+  if (inLen > 0.18) {
+    touchDirX = inputDirX / inLen;
+    touchDirZ = inputDirZ / inLen;
+  } else if (playerSpeed > 1.2) {
+    touchDirX = player.velocity.x / playerSpeed;
+    touchDirZ = player.velocity.z / playerSpeed;
+  } else {
+    touchDirX = Math.sin(player.facingAngle);
+    touchDirZ = Math.cos(player.facingAngle);
+  }
+  const facingX = Math.sin(player.facingAngle);
+  const facingZ = Math.cos(player.facingAngle);
+  let incomingAlign = 0.5;
+  if (ballSpeed > 1.5) {
+    const ballNx = ball.velocity.x / ballSpeed;
+    const ballNz = ball.velocity.z / ballSpeed;
+    const facingBall = -(ballNx * facingX + ballNz * facingZ);
+    const runningWithBall = ballNx * touchDirX + ballNz * touchDirZ;
+    incomingAlign = Math.max(facingBall, runningWithBall * 0.9);
+  }
+  const skillFactor = Math.max(0.5, Math.min(1.1, player.attributes.dribbling / 85));
+  const heightDifficulty = Math.max(0, (ball.position.y - 0.55) * 0.45);
+  const speedDifficulty = Math.max(0, (ballSpeed - 9.5) / 14);
+  const sprintDifficulty = isSprinting ? 0.28 : playerSpeed > 4.5 ? 0.12 : 0;
+  const alignPenalty = incomingAlign < 0 ? Math.abs(incomingAlign) * 0.26 : 0;
+  const difficulty = (speedDifficulty + heightDifficulty + sprintDifficulty + alignPenalty) / skillFactor;
+  if (ballSpeed > 19.5 && difficulty > 0.92 && ball.lastTouchTeam !== player.team) {
+    const deflectSpeed = Math.min(9.5, ballSpeed * 0.34);
+    return {
+      outcome: "heavy_touch",
+      touchOffsetMeters: 0.95,
+      touchDirX,
+      touchDirZ,
+      deflectSpeed
+    };
+  }
+  const baseTouch = isSprinting ? 0.92 : 0.68;
+  const touchOffsetMeters = Math.min(1.28, baseTouch + difficulty * 0.34);
+  return {
+    outcome: "control",
+    touchOffsetMeters,
+    touchDirX,
+    touchDirZ,
+    deflectSpeed: 0
+  };
+}
+function resolveLooseBallBodyContact(ball, players) {
+  if (ball.ownerId !== null || ball.position.y > 1.8) return null;
+  const minDist = PLAYER_RADIUS + BALL_RADIUS;
+  const minDistSq = minDist * minDist;
+  for (let i = 0; i < players.length; i++) {
+    const p = players[i];
+    if (p.role === "GK") continue;
+    if (p.kickCooldown > 0.16) continue;
+    const dx = ball.position.x - p.position.x;
+    const dz = ball.position.z - p.position.z;
+    const distSq = dx * dx + dz * dz;
+    if (distSq >= minDistSq || distSq < 1e-6) continue;
+    const dist = Math.sqrt(distSq);
+    const nx = dx / dist;
+    const nz = dz / dist;
+    ball.position.x = p.position.x + nx * (minDist + 0.03);
+    ball.position.z = p.position.z + nz * (minDist + 0.03);
+    const vn = ball.velocity.x * nx + ball.velocity.z * nz;
+    if (vn < -1) {
+      ball.velocity.x = (ball.velocity.x - 1.45 * vn * nx) * 0.52 + p.velocity.x * 0.25;
+      ball.velocity.z = (ball.velocity.z - 1.45 * vn * nz) * 0.52 + p.velocity.z * 0.25;
+      ball.velocity.y = Math.max(ball.velocity.y * 0.45, 0.85);
+      ball.lastTouchTeam = p.team;
+      ball.lastTouchPlayerName = p.name;
+      ball.pickupLockTimer = Math.max(ball.pickupLockTimer, 0.12);
+      return p;
+    }
+  }
+  return null;
+}
 function predictBallCrossingX(ball, targetX) {
   if (ball.ownerId !== null) return null;
   const dx = targetX - ball.position.x;
@@ -216,19 +431,20 @@ function attemptGoalkeeperSave(gk, ball) {
   const dz = ball.position.z - gk.position.z;
   const horizDist = Math.hypot(dx, dz);
   const isDiving = gk.actionState === "dive";
-  const reachRadius = isDiving ? 1.55 : 1.05;
-  const maxReachHeight = isDiving ? 2.25 : 2.15;
+  const reachRadius = isDiving ? 1.58 : 1.05;
+  const maxReachHeight = isDiving ? 2.28 : 2.15;
   if (horizDist > reachRadius || ball.position.y > maxReachHeight) {
     return null;
   }
   const ballSpeed = Math.hypot(ball.velocity.x, ball.velocity.z);
   const attackDir = gk.team === "home" ? 1 : -1;
-  if (ballSpeed > 18.5 && ball.lastTouchTeam !== gk.team) {
-    const deflectZ = Math.abs(dz) > 0.12 ? Math.sign(dz) * 0.75 : gk.position.z >= 0 ? 0.7 : -0.7;
+  const isHardSave = ball.lastTouchTeam !== gk.team && (ballSpeed > 18.5 || isDiving && ballSpeed > 14.5 && horizDist > 0.9);
+  if (isHardSave) {
+    const deflectZ = Math.abs(dz) > 0.12 ? Math.sign(dz) * 0.82 : gk.position.z >= 0 ? 0.78 : -0.78;
     ball.velocity.x = attackDir * (8.5 + Math.random() * 3.5);
-    ball.velocity.z = deflectZ * (9.5 + Math.random() * 3.5);
+    ball.velocity.z = deflectZ * (10 + Math.random() * 3.5);
     ball.velocity.y = 2.8;
-    ball.pickupLockTimer = 0.2;
+    ball.pickupLockTimer = 0.22;
     ball.lastTouchTeam = gk.team;
     ball.lastTouchPlayerName = gk.name;
     gk.kickCooldown = 0.35;
@@ -562,41 +778,117 @@ function evaluatePassLaneClearance(passer, receiver, allPlayers) {
 function computeLeadPassVector(passer, receiver, isLob) {
   const rawDx = receiver.position.x - passer.position.x;
   const rawDz = receiver.position.z - passer.position.z;
-  const rawDist = Math.hypot(rawDx, rawDz);
-  const estSpeed = isLob ? Math.min(25, Math.max(15, rawDist * 0.92)) : Math.min(22, Math.max(11, rawDist * 0.98));
-  const travelTime = Math.min(1.1, rawDist / estSpeed);
-  const leadX = receiver.position.x + receiver.velocity.x * travelTime * 0.58;
-  const leadZ = receiver.position.z + receiver.velocity.z * travelTime * 0.58;
+  const rawDist = Math.hypot(rawDx, rawDz) || 1;
+  const passKind = isLob ? "lob" : rawDist <= 15 ? "short" : "long";
+  const facingX = Math.sin(passer.facingAngle);
+  const facingZ = Math.cos(passer.facingAngle);
+  const alignDot = rawDx / rawDist * facingX + rawDz / rawDist * facingZ;
+  const alignFactor = Math.max(0.76, Math.min(1.04, 0.88 + alignDot * 0.16));
+  const passerSpeed = Math.hypot(passer.velocity.x, passer.velocity.z);
+  const speedPenalty = Math.min(1, passerSpeed / 10) * 0.032;
+  let estSpeed;
+  let loft;
+  let leadFactor;
+  let baseSpread;
+  if (passKind === "lob") {
+    estSpeed = Math.min(24.5, Math.max(14.5, 11.5 + rawDist * 0.42)) * alignFactor;
+    loft = Math.min(9.4, Math.max(5.8, 5.2 + rawDist * 0.135));
+    leadFactor = 0.64;
+    baseSpread = 0.068;
+  } else if (passKind === "short") {
+    estSpeed = Math.min(17.5, Math.max(11.5, 9.8 + rawDist * 0.52)) * alignFactor;
+    loft = 0.28 + Math.min(0.18, rawDist * 0.01);
+    leadFactor = 0.44;
+    baseSpread = 0.024;
+  } else {
+    estSpeed = Math.min(24.2, Math.max(17.8, 12.2 + rawDist * 0.36)) * alignFactor;
+    loft = 0.78 + Math.min(0.75, (rawDist - 15) * 0.032);
+    leadFactor = 0.62;
+    baseSpread = 0.052;
+  }
+  const travelTime = Math.min(1.15, rawDist / Math.max(8, estSpeed));
+  const leadX = receiver.position.x + receiver.velocity.x * travelTime * leadFactor;
+  const leadZ = receiver.position.z + receiver.velocity.z * travelTime * leadFactor;
+  const skillError = (100 - passer.attributes.passing) / 100 * 0.055;
+  const offAxisError = alignDot < 0.15 ? (0.15 - alignDot) * 0.045 : 0;
+  const spreadFactor = baseSpread + skillError + speedPenalty + offAxisError;
   return {
     dirX: leadX - passer.position.x,
     dirZ: leadZ - passer.position.z,
     speed: estSpeed,
-    loft: isLob ? Math.min(8.5, 4.8 + rawDist * 0.1) : 0.55
+    loft,
+    passKind,
+    spreadFactor
   };
 }
-function findBestPassTarget(passer, players, aimX, aimZ) {
+function findBestPassTarget(passer, players, aimX, aimZ, isLob = false) {
   const aimLen = Math.hypot(aimX, aimZ);
-  const dirX = aimLen > 0.15 ? aimX / aimLen : Math.sin(passer.facingAngle);
-  const dirZ = aimLen > 0.15 ? aimZ / aimLen : Math.cos(passer.facingAngle);
+  const facingX = Math.sin(passer.facingAngle);
+  const facingZ = Math.cos(passer.facingAngle);
+  let dirX = facingX;
+  let dirZ = facingZ;
+  if (aimLen > 0.15) {
+    const nx = aimX / aimLen;
+    const nz = aimZ / aimLen;
+    dirX = nx * 0.88 + facingX * 0.12;
+    dirZ = nz * 0.88 + facingZ * 0.12;
+    const dLen = Math.hypot(dirX, dirZ) || 1;
+    dirX /= dLen;
+    dirZ /= dLen;
+  }
   let best = null;
   let bestScore = -Infinity;
+  const idealDist = isLob ? 24 : 14;
+  const maxDist = isLob ? 54 : 46;
   for (const p of players) {
     if (p.team !== passer.team || p.id === passer.id) continue;
     const dx = p.position.x - passer.position.x;
     const dz = p.position.z - passer.position.z;
     const dist = Math.hypot(dx, dz);
-    if (dist < 2.2 || dist > 48) continue;
+    if (dist < (isLob ? 6.5 : 2.2) || dist > maxDist) continue;
     const dot = dx / dist * dirX + dz / dist * dirZ;
-    if (dot < 0.12) continue;
+    if (dot < 0.16) continue;
     const laneClear = evaluatePassLaneClearance(passer, p, players);
-    const distPenalty = Math.abs(dist - 16) * 0.015;
-    const score = dot * 2.1 + laneClear * 0.85 - distPenalty;
+    const laneWeight = isLob ? 0.3 : 0.95;
+    const distPenalty = Math.abs(dist - idealDist) * 0.016;
+    const score = dot * 2.25 + laneClear * laneWeight - distPenalty;
     if (score > bestScore) {
       bestScore = score;
       best = p;
     }
   }
   return best;
+}
+function evaluateInterception(defender, ball) {
+  if (ball.ownerId !== null || defender.role === "GK" || defender.kickCooldown > 0) {
+    return "none";
+  }
+  if (ball.lastTouchTeam === defender.team) return "none";
+  const dx = ball.position.x - defender.position.x;
+  const dz = ball.position.z - defender.position.z;
+  const horizDist = Math.hypot(dx, dz);
+  const isTackling = defender.actionState === "tackle";
+  const maxReach = isTackling ? 1.22 : 0.86;
+  if (horizDist > maxReach || ball.position.y > 1.92) {
+    return "none";
+  }
+  const ballSpeed = Math.hypot(ball.velocity.x, ball.velocity.z);
+  if (ball.position.y > 1.35) {
+    return horizDist <= 0.72 ? "block" : "none";
+  }
+  if (ballSpeed < 10.5) {
+    return "intercept";
+  }
+  const facingX = Math.sin(defender.facingAngle);
+  const facingZ = Math.cos(defender.facingAngle);
+  const toBallDot = horizDist > 0.01 ? dx / horizDist * facingX + dz / horizDist * facingZ : 1;
+  if (!isTackling && toBallDot < -0.15 && horizDist > 0.56) {
+    return "none";
+  }
+  if (ballSpeed > 17.5) {
+    return horizDist <= (isTackling ? 1.05 : 0.74) ? "block" : "none";
+  }
+  return "intercept";
 }
 function getRestartPositionForOutOfBounds(outType, ballX, ballZ, lastTouchTeam) {
   const clampedX = Math.max(-HALF_LENGTH + 1, Math.min(HALF_LENGTH - 1, ballX));
@@ -909,7 +1201,8 @@ function computeDefensiveAssignments(players, ball, team) {
   let coverId = null;
   let best1 = Infinity;
   let best2 = Infinity;
-  for (const p of players) {
+  for (let i = 0; i < players.length; i++) {
+    const p = players[i];
     if (p.team !== team || p.role === "GK" || p.isControlled) continue;
     const d = Math.hypot(p.position.x - ball.position.x, p.position.z - ball.position.z);
     if (d < best1) {
@@ -924,7 +1217,7 @@ function computeDefensiveAssignments(players, ball, team) {
   }
   return { presserId, coverId };
 }
-function computeAiSteering(player, allPlayers, ball, formationId, closestPresserId, coverDefenderId = null, mentality = "balanced") {
+function computeAiSteering(player, allPlayers, ball, formationId, closestPresserId, coverDefenderId = null, mentality = "balanced", transitionMode = "none") {
   const formation = FORMATIONS[formationId] ?? FORMATIONS["4-3-3"];
   const tactics = getFormationTactics(formationId, mentality);
   const slot = formation.slots[player.slotIndex] ?? formation.slots[0];
@@ -941,12 +1234,12 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
   const oppGoalX = attackDir * HALF_LENGTH;
   const ownGoalX = -attackDir * HALF_LENGTH;
   if (player.role === "GK") {
-    const gkBaseX = -attackDir * (HALF_LENGTH - 1.6);
+    const gkBaseX = -attackDir * (HALF_LENGTH - 1.55);
     if (player.hasBall) {
       if (player.gkHoldTimer > 0) {
         return {
           desiredX: gkBaseX,
-          desiredZ: 0,
+          desiredZ: Math.max(-2.5, Math.min(2.5, player.position.z * 0.6)),
           sprint: false,
           shouldPass: false,
           shouldShoot: false,
@@ -956,8 +1249,24 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
           passTarget: null
         };
       }
-      const wideSide = player.position.z >= 0 ? -0.45 : 0.45;
-      const target = findBestPassTarget(player, allPlayers, attackDir, wideSide);
+      let bestOutlet = null;
+      let bestOutletScore = -Infinity;
+      for (let i = 0; i < allPlayers.length; i++) {
+        const mate = allPlayers[i];
+        if (mate.team !== player.team || mate.id === player.id) continue;
+        const dx = (mate.position.x - player.position.x) * attackDir;
+        if (dx < 5 || dx > 48) continue;
+        const dist = Math.hypot(mate.position.x - player.position.x, mate.position.z - player.position.z);
+        const laneClear = evaluatePassLaneClearance(player, mate, allPlayers);
+        if (laneClear < 0.3) continue;
+        const wideBonus = Math.abs(mate.position.z) > 10 ? 0.55 : 0;
+        const score = laneClear * 2.4 + wideBonus - Math.abs(dist - 20) * 0.025;
+        if (score > bestOutletScore) {
+          bestOutletScore = score;
+          bestOutlet = mate;
+        }
+      }
+      const outletDist = bestOutlet ? Math.hypot(bestOutlet.position.x - player.position.x, bestOutlet.position.z - player.position.z) : 32;
       return {
         desiredX: gkBaseX,
         desiredZ: 0,
@@ -967,14 +1276,15 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
         shouldTackle: false,
         shouldDive: false,
         diveDir: 0,
-        passTarget: target
+        passTarget: bestOutlet,
+        preferLob: !bestOutlet || outletDist > 22
       };
     }
     const shotCross = predictBallCrossingX(ball, gkBaseX);
     const ballSpeed = Math.hypot(ball.velocity.x, ball.velocity.z);
-    if (shotCross && shotCross.time < 0.72 && ballSpeed > 11 && Math.abs(shotCross.z) <= GOAL_HALF_WIDTH + 1.1 && shotCross.y <= 2.6) {
+    if (shotCross && shotCross.time < 0.76 && ballSpeed > 10.5 && Math.abs(shotCross.z) <= GOAL_HALF_WIDTH + 1.15 && shotCross.y <= 2.65) {
       const zDiff = shotCross.z - player.position.z;
-      const shouldDive = player.diveCooldown <= 0 && Math.abs(zDiff) > 0.7 && shotCross.time < 0.42;
+      const shouldDive = player.diveCooldown <= 0 && Math.abs(zDiff) > 0.65 && shotCross.time < 0.44;
       return {
         desiredX: gkBaseX,
         desiredZ: Math.max(-GOAL_HALF_WIDTH, Math.min(GOAL_HALF_WIDTH, shotCross.z)),
@@ -988,26 +1298,35 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
       };
     }
     const distToBall = Math.hypot(ball.position.x - player.position.x, ball.position.z - player.position.z);
-    const ballInOwnBox = Math.abs(ball.position.x - ownGoalX) < 13.5 && Math.abs(ball.position.z) < 13;
-    if (ball.ownerId === null && ballInOwnBox && distToBall < 11) {
-      return {
-        desiredX: ball.position.x,
-        desiredZ: ball.position.z,
-        sprint: true,
-        shouldPass: false,
-        shouldShoot: false,
-        shouldTackle: false,
-        shouldDive: false,
-        diveDir: 0,
-        passTarget: null
-      };
+    const ballInOwnBox = Math.abs(ball.position.x - ownGoalX) < 13.5 && Math.abs(ball.position.z) < 13.5;
+    if (ball.ownerId === null && ballInOwnBox && distToBall < 11 && ballSpeed < 12) {
+      let nearestOppToBall = Infinity;
+      for (let i = 0; i < allPlayers.length; i++) {
+        const opp = allPlayers[i];
+        if (opp.team === player.team) continue;
+        const d = Math.hypot(opp.position.x - ball.position.x, opp.position.z - ball.position.z);
+        if (d < nearestOppToBall) nearestOppToBall = d;
+      }
+      if (distToBall <= nearestOppToBall + 1.8) {
+        return {
+          desiredX: ball.position.x,
+          desiredZ: ball.position.z,
+          sprint: true,
+          shouldPass: false,
+          shouldShoot: false,
+          shouldTackle: false,
+          shouldDive: false,
+          diveDir: 0,
+          passTarget: null
+        };
+      }
     }
     const distBallFromGoal = Math.hypot(ball.position.x - ownGoalX, ball.position.z);
-    const stepOut = Math.min(3.8, Math.max(1.2, 4.4 - distBallFromGoal * 0.055));
+    const stepOut = Math.min(4.2, Math.max(1.25, 4.7 - distBallFromGoal * 0.06));
     const idealX = ownGoalX + attackDir * stepOut;
     const idealZ = Math.max(
-      -GOAL_HALF_WIDTH * 0.82,
-      Math.min(GOAL_HALF_WIDTH * 0.82, ball.position.z * 0.38)
+      -GOAL_HALF_WIDTH * 0.84,
+      Math.min(GOAL_HALF_WIDTH * 0.84, ball.position.z * (distBallFromGoal < 18 ? 0.44 : 0.34))
     );
     return {
       desiredX: idealX,
@@ -1023,7 +1342,7 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
   }
   if (player.hasBall) {
     const distToOppGoal = Math.hypot(oppGoalX - player.position.x, 0 - player.position.z);
-    if (distToOppGoal < 26 && Math.abs(player.position.z) < 20) {
+    if (distToOppGoal < 25 && Math.abs(player.position.z) < 19) {
       return {
         desiredX: oppGoalX,
         desiredZ: 0,
@@ -1038,7 +1357,8 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
     }
     let nearestOppDist = Infinity;
     let nearestOpp = null;
-    for (const other of allPlayers) {
+    for (let i = 0; i < allPlayers.length; i++) {
+      const other = allPlayers[i];
       if (other.team === player.team) continue;
       const d = Math.hypot(other.position.x - player.position.x, other.position.z - player.position.z);
       if (d < nearestOppDist) {
@@ -1048,22 +1368,32 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
     }
     let bestTarget = null;
     let bestPassScore = -Infinity;
-    for (const mate of allPlayers) {
+    let bestTargetLaneClear = 1;
+    for (let i = 0; i < allPlayers.length; i++) {
+      const mate = allPlayers[i];
       if (mate.team !== player.team || mate.id === player.id || mate.role === "GK") continue;
       const dx = mate.position.x - player.position.x;
       const dz = mate.position.z - player.position.z;
       const dist = Math.hypot(dx, dz);
-      if (dist < 4 || dist > 38) continue;
+      if (dist < 5 || dist > 40) continue;
       const forwardProgress = dx * attackDir;
       const laneClear = evaluatePassLaneClearance(player, mate, allPlayers);
-      if (laneClear < 0.25) continue;
-      const score = forwardProgress * 0.14 + laneClear * 2 - Math.abs(dist - 16) * 0.03;
+      const canLobOver = dist > 16 && forwardProgress > 8 && laneClear >= 0.08;
+      if (laneClear < 0.28 && !canLobOver) continue;
+      const counterBonus = transitionMode === "attack" && forwardProgress > 8 ? 0.85 : 0;
+      const score = forwardProgress * 0.14 + laneClear * 2.1 + counterBonus - Math.abs(dist - 15) * 0.028;
       if (score > bestPassScore) {
         bestPassScore = score;
         bestTarget = mate;
+        bestTargetLaneClear = laneClear;
       }
     }
-    if (bestTarget && (nearestOppDist < 5.2 || (bestTarget.position.x - player.position.x) * attackDir > 8 && bestPassScore > 2.2)) {
+    if (bestTarget && (nearestOppDist < 5 || (bestTarget.position.x - player.position.x) * attackDir > 7.5 && bestPassScore > 2.15)) {
+      const targetDist = Math.hypot(
+        bestTarget.position.x - player.position.x,
+        bestTarget.position.z - player.position.z
+      );
+      const preferLob = targetDist > 23 || targetDist > 16 && bestTargetLaneClear < 0.38;
       return {
         desiredX: bestTarget.position.x,
         desiredZ: bestTarget.position.z,
@@ -1073,19 +1403,20 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
         shouldTackle: false,
         shouldDive: false,
         diveDir: 0,
-        passTarget: bestTarget
+        passTarget: bestTarget,
+        preferLob
       };
     }
-    let targetZ = player.position.z * 0.72;
+    let targetZ = player.position.z * 0.74;
     if (nearestOpp && nearestOppDist < 7.5) {
       const awayZ = player.position.z - nearestOpp.position.z;
-      targetZ = player.position.z + (awayZ >= 0 ? 4.5 : -4.5);
+      targetZ = player.position.z + (awayZ >= 0 ? 4.8 : -4.8);
       targetZ = Math.max(-HALF_WIDTH + 3, Math.min(HALF_WIDTH - 3, targetZ));
     }
     return {
       desiredX: oppGoalX,
       desiredZ: targetZ,
-      sprint: distToOppGoal > 16 && nearestOppDist > 4.2,
+      sprint: distToOppGoal > 15 && nearestOppDist > 4,
       shouldPass: false,
       shouldShoot: false,
       shouldTackle: false,
@@ -1094,22 +1425,51 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
       passTarget: null
     };
   }
-  const owner = ball.ownerId ? allPlayers.find((p) => p.id === ball.ownerId) : null;
+  let owner = null;
+  if (ball.ownerId) {
+    for (let i = 0; i < allPlayers.length; i++) {
+      if (allPlayers[i].id === ball.ownerId) {
+        owner = allPlayers[i];
+        break;
+      }
+    }
+  }
   const teamHasBall = owner?.team === player.team;
   if (teamHasBall && owner) {
     const isAttacker = player.role === "ST" || player.role === "LW" || player.role === "RW" || player.role === "CAM";
+    const distToOwner = Math.hypot(
+      owner.position.x - player.position.x,
+      owner.position.z - player.position.z
+    );
     if (isAttacker) {
-      const pushDist = 14 + tactics.attackPushMeters;
-      const runDepth = Math.min(
+      const counterPush = transitionMode === "attack" ? 5.5 : 0;
+      const pushDist = 13.5 + tactics.attackPushMeters + counterPush;
+      let runDepth = Math.min(
         HALF_LENGTH - 5.5,
         Math.max(anchor.x, ball.position.x + attackDir * pushDist)
       );
-      const runWidth = player.role === "LW" ? -HALF_WIDTH * 0.58 * tactics.widthScale * attackDir : player.role === "RW" ? HALF_WIDTH * 0.58 * tactics.widthScale * attackDir : anchor.z;
+      if (attackDir < 0) {
+        runDepth = Math.max(
+          -HALF_LENGTH + 5.5,
+          Math.min(anchor.x, ball.position.x + attackDir * pushDist)
+        );
+      }
+      let runWidth;
+      if (player.role === "LW") {
+        runWidth = -HALF_WIDTH * 0.62 * tactics.widthScale * attackDir;
+      } else if (player.role === "RW") {
+        runWidth = HALF_WIDTH * 0.62 * tactics.widthScale * attackDir;
+      } else if (player.role === "ST") {
+        const channelBias = owner.position.z >= 0 ? -4.5 : 4.5;
+        runWidth = Math.max(-11, Math.min(11, anchor.z * 0.45 + channelBias));
+      } else {
+        runWidth = Math.max(-15, Math.min(15, owner.position.z * 0.5 + (owner.position.z >= 0 ? -7.5 : 7.5)));
+      }
       const clampedX = Math.max(-HALF_LENGTH + 5, Math.min(HALF_LENGTH - 5, runDepth));
       return {
         desiredX: clampedX,
         desiredZ: Math.max(-HALF_WIDTH + 2.5, Math.min(HALF_WIDTH - 2.5, runWidth)),
-        sprint: Math.abs(clampedX - player.position.x) > 5,
+        sprint: transitionMode === "attack" || Math.abs(clampedX - player.position.x) > 5.5,
         shouldPass: false,
         shouldShoot: false,
         shouldTackle: false,
@@ -1118,21 +1478,24 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
         passTarget: null
       };
     }
-    const distToOwner = Math.hypot(owner.position.x - player.position.x, owner.position.z - player.position.z);
-    if ((player.role === "CM" || player.role === "CDM") && distToOwner < 26) {
-      const supportX = Math.max(
+    if ((player.role === "CM" || player.role === "CDM") && distToOwner < 28) {
+      const forwardOffset = player.role === "CM" ? 6.5 : -6;
+      const supportX2 = Math.max(
         -HALF_LENGTH + 6,
         Math.min(
           HALF_LENGTH - 6,
-          owner.position.x + attackDir * ((player.role === "CM" ? 4 : -6) + tactics.attackPushMeters * 0.4)
+          owner.position.x + attackDir * (forwardOffset + tactics.attackPushMeters * 0.45)
         )
       );
-      const laneOffset = player.position.z >= owner.position.z ? 9.5 : -9.5;
-      const supportZ = Math.max(-HALF_WIDTH + 3, Math.min(HALF_WIDTH - 3, owner.position.z + laneOffset));
+      const preferredSign = Math.abs(player.position.z - owner.position.z) > 1.5 ? player.position.z >= owner.position.z ? 1 : -1 : owner.position.z >= 0 ? -1 : 1;
+      const supportZ2 = Math.max(
+        -HALF_WIDTH + 3.5,
+        Math.min(HALF_WIDTH - 3.5, owner.position.z + preferredSign * 10.5)
+      );
       return {
-        desiredX: supportX,
-        desiredZ: supportZ,
-        sprint: false,
+        desiredX: supportX2,
+        desiredZ: supportZ2,
+        sprint: Math.hypot(supportX2 - player.position.x, supportZ2 - player.position.z) > 8,
         shouldPass: false,
         shouldShoot: false,
         shouldTackle: false,
@@ -1141,12 +1504,18 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
         passTarget: null
       };
     }
+    let supportX = Math.max(
+      -HALF_LENGTH + 4.5,
+      Math.min(HALF_LENGTH - 4.5, anchor.x + attackDir * (6 + tactics.attackPushMeters * 0.5))
+    );
+    let supportZ = anchor.z;
+    if (distToOwner < 7) {
+      supportX -= attackDir * 3.5;
+      supportZ += player.position.z >= owner.position.z ? 4 : -4;
+    }
     return {
-      desiredX: Math.max(
-        -HALF_LENGTH + 4,
-        Math.min(HALF_LENGTH - 4, anchor.x + attackDir * (6.5 + tactics.attackPushMeters * 0.5))
-      ),
-      desiredZ: anchor.z,
+      desiredX: Math.max(-HALF_LENGTH + 4, Math.min(HALF_LENGTH - 4, supportX)),
+      desiredZ: Math.max(-HALF_WIDTH + 3, Math.min(HALF_WIDTH - 3, supportZ)),
       sprint: false,
       shouldPass: false,
       shouldShoot: false,
@@ -1160,12 +1529,12 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
     const targetX = ball.position.x + ball.velocity.x * 0.16;
     const targetZ = ball.position.z + ball.velocity.z * 0.16;
     const distToBall = Math.hypot(ball.position.x - player.position.x, ball.position.z - player.position.z);
-    const tackleTriggerRange = TACKLE_REACH * (0.94 + tactics.pressIntensity * 0.1);
-    const canAttemptTackle = owner != null && owner.team !== player.team && distToBall < tackleTriggerRange && player.tackleCooldown <= 0;
+    const tackleTriggerRange = TACKLE_REACH * (0.92 + tactics.pressIntensity * 0.09);
+    const canAttemptTackle = owner != null && owner.team !== player.team && distToBall < tackleTriggerRange && player.tackleCooldown <= 0 && isCleanTackleAngle(player, owner, ball);
     return {
       desiredX: Math.max(-HALF_LENGTH + 2, Math.min(HALF_LENGTH - 2, targetX)),
       desiredZ: Math.max(-HALF_WIDTH + 2, Math.min(HALF_WIDTH - 2, targetZ)),
-      sprint: tactics.pressIntensity >= 0.85 || distToBall < 14,
+      sprint: transitionMode === "defend" || tactics.pressIntensity >= 0.85 || distToBall < 14,
       shouldPass: false,
       shouldShoot: false,
       shouldTackle: canAttemptTackle,
@@ -1178,13 +1547,34 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
     const toGoalX = ownGoalX - ball.position.x;
     const toGoalZ = 0 - ball.position.z;
     const toGoalLen = Math.hypot(toGoalX, toGoalZ) || 1;
-    const coverDist = tactics.pressIntensity > 1.1 ? 5.2 : 6.6;
-    const coverX = ball.position.x + toGoalX / toGoalLen * coverDist;
-    const coverZ = ball.position.z + toGoalZ / toGoalLen * coverDist;
+    const coverDist = tactics.pressIntensity > 1.1 ? 5 : 6.4;
+    let coverX = ball.position.x + toGoalX / toGoalLen * coverDist;
+    let coverZ = ball.position.z + toGoalZ / toGoalLen * coverDist;
+    if (owner && owner.team !== player.team) {
+      let bestRunner = null;
+      let bestThreat = -Infinity;
+      for (let i = 0; i < allPlayers.length; i++) {
+        const opp = allPlayers[i];
+        if (opp.team === player.team || opp.id === owner.id || opp.role === "GK") continue;
+        const dFromBall = Math.hypot(opp.position.x - ball.position.x, opp.position.z - ball.position.z);
+        if (dFromBall < 6 || dFromBall > 26) continue;
+        const goalThreat = -Math.abs(opp.position.x - ownGoalX);
+        if (goalThreat > bestThreat) {
+          bestThreat = goalThreat;
+          bestRunner = opp;
+        }
+      }
+      if (bestRunner) {
+        const screenX = ball.position.x * 0.55 + bestRunner.position.x * 0.45;
+        const screenZ = ball.position.z * 0.55 + bestRunner.position.z * 0.45;
+        coverX = coverX * 0.55 + screenX * 0.45;
+        coverZ = coverZ * 0.55 + screenZ * 0.45;
+      }
+    }
     return {
       desiredX: Math.max(-HALF_LENGTH + 4, Math.min(HALF_LENGTH - 4, coverX)),
       desiredZ: Math.max(-HALF_WIDTH + 3, Math.min(HALF_WIDTH - 3, coverZ)),
-      sprint: Math.hypot(coverX - player.position.x, coverZ - player.position.z) > 6,
+      sprint: transitionMode === "defend" || Math.hypot(coverX - player.position.x, coverZ - player.position.z) > 5.5,
       shouldPass: false,
       shouldShoot: false,
       shouldTackle: false,
@@ -1196,8 +1586,9 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
   const isDefender = player.role === "CB" || player.role === "LB" || player.role === "RB" || player.role === "CDM";
   if (isDefender) {
     let markTarget = null;
-    let bestMarkDist = 14.5;
-    for (const opp of allPlayers) {
+    let bestMarkDist = 15.5;
+    for (let i = 0; i < allPlayers.length; i++) {
+      const opp = allPlayers[i];
       if (opp.team === player.team || opp.role === "GK") continue;
       const d = Math.hypot(opp.position.x - anchor.x, opp.position.z - anchor.z);
       if (d < bestMarkDist) {
@@ -1206,12 +1597,14 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
       }
     }
     if (markTarget) {
-      const markX = markTarget.position.x - attackDir * 2.1;
-      const markZ = markTarget.position.z * 0.92;
+      const predX = markTarget.position.x + markTarget.velocity.x * 0.25;
+      const predZ = markTarget.position.z + markTarget.velocity.z * 0.25;
+      const markX = predX - attackDir * 2;
+      const markZ = predZ * 0.9;
       return {
         desiredX: Math.max(-HALF_LENGTH + 3.5, Math.min(HALF_LENGTH - 3.5, markX)),
         desiredZ: Math.max(-HALF_WIDTH + 2.5, Math.min(HALF_WIDTH - 2.5, markZ)),
-        sprint: Math.hypot(markX - player.position.x, markZ - player.position.z) > 5,
+        sprint: transitionMode === "defend" || Math.hypot(markX - player.position.x, markZ - player.position.z) > 4.8,
         shouldPass: false,
         shouldShoot: false,
         shouldTackle: false,
@@ -1221,10 +1614,12 @@ function computeAiSteering(player, allPlayers, ball, formationId, closestPresser
       };
     }
   }
+  const recoveryShift = transitionMode === "defend" ? -attackDir * 5 : 0;
+  const recoverX = Math.max(-HALF_LENGTH + 4, Math.min(HALF_LENGTH - 4, anchor.x + recoveryShift));
   return {
-    desiredX: anchor.x,
+    desiredX: recoverX,
     desiredZ: anchor.z,
-    sprint: false,
+    sprint: transitionMode === "defend" && Math.hypot(recoverX - player.position.x, anchor.z - player.position.z) > 6,
     shouldPass: false,
     shouldShoot: false,
     shouldTackle: false,
@@ -1239,11 +1634,24 @@ function executeAiBallAction(player, ball, steering, allPlayers = [], onSound) {
     const oppGk = allPlayers.find((p) => p.team !== player.team && p.role === "GK");
     const gkZ = oppGk?.position.z ?? 0;
     const cornerSign = gkZ >= 0 ? -1 : 1;
-    const targetZ = cornerSign * (GOAL_HALF_WIDTH * 0.65) + (Math.random() - 0.5) * 0.9;
-    const dirX = attackDir * HALF_LENGTH - player.position.x;
-    const dirZ = targetZ - player.position.z;
-    const sideSpin = cornerSign * 1.4;
-    applyBallKick(ball, dirX, dirZ, player.attributes.shotPower * 0.96, 4.1, player, sideSpin);
+    const targetZ = cornerSign * (GOAL_HALF_WIDTH * 0.65);
+    const shot = computeContextualShot(
+      player,
+      attackDir * HALF_LENGTH,
+      targetZ,
+      0.58,
+      allPlayers,
+      player.actionState === "sprint"
+    );
+    applyBallKick(
+      ball,
+      shot.dirX,
+      shot.dirZ,
+      shot.horizontalSpeed,
+      shot.loftSpeed,
+      player,
+      shot.sideSpin
+    );
     onSound?.("kick");
     return;
   }
@@ -1252,11 +1660,10 @@ function executeAiBallAction(player, ball, steering, allPlayers = [], onSound) {
       steering.passTarget.position.x - player.position.x,
       steering.passTarget.position.z - player.position.z
     );
-    const isLob = dist > 23;
+    const isLob = steering.preferLob ?? dist > 23;
     const lead = computeLeadPassVector(player, steering.passTarget, isLob);
-    const inaccuracy = (100 - player.attributes.passing) / 100 * 0.08;
-    const spreadX = (Math.random() - 0.5) * inaccuracy * dist;
-    const spreadZ = (Math.random() - 0.5) * inaccuracy * dist;
+    const spreadX = (Math.random() - 0.5) * lead.spreadFactor * dist;
+    const spreadZ = (Math.random() - 0.5) * lead.spreadFactor * dist;
     applyBallKick(
       ball,
       lead.dirX + spreadX,
@@ -1265,9 +1672,9 @@ function executeAiBallAction(player, ball, steering, allPlayers = [], onSound) {
       lead.loft,
       player
     );
-    onSound?.("pass");
+    onSound?.(isLob ? "kick" : "pass");
   } else if (steering.shouldPass && player.role === "GK") {
-    applyBallKick(ball, attackDir, (Math.random() - 0.5) * 0.5, 22, 6.4, player);
+    applyBallKick(ball, attackDir, (Math.random() - 0.5) * 0.45, 22, 6.4, player);
     onSound?.("kick");
   }
 }
@@ -2027,6 +2434,14 @@ var MatchEngine = class {
     this.netBallTarget = null;
     this.netPlayerTargets = /* @__PURE__ */ new Map();
     this.hasReceivedNetSnapshot = false;
+    // Lightweight AI caching, turnover transition tracking, and GK human reaction timers
+    this.aiDecisionCache = /* @__PURE__ */ new Map();
+    this.aiTickCounter = 0;
+    this.lastPossessionTeam = null;
+    this.transitionTimer = 0;
+    this.gkDiveReactionTimer = /* @__PURE__ */ new Map();
+    this.lastHomeInputDir = { x: 0, z: 0 };
+    this.lastAwayInputDir = { x: 0, z: 0 };
     this.homeTeam = homeTeam;
     this.awayTeam = awayTeam;
     this.homeFormation = homeFormation;
@@ -2144,6 +2559,11 @@ var MatchEngine = class {
     this.isReplaying = false;
     this.netBallTarget = null;
     this.netPlayerTargets.clear();
+    this.aiDecisionCache.clear();
+    this.gkDiveReactionTimer.clear();
+    this.aiTickCounter = 0;
+    this.lastPossessionTeam = null;
+    this.transitionTimer = 0;
     this.hasReceivedNetSnapshot = false;
     this.replayRecorder.clear();
     resetForKickoff(
@@ -2550,9 +2970,22 @@ var MatchEngine = class {
         this.awayShotCharge = 0;
       }
     }
+    this.lastHomeInputDir.x = input.moveX;
+    this.lastHomeInputDir.z = input.moveZ;
+    if (awayInput) {
+      this.lastAwayInputDir.x = awayInput.moveX;
+      this.lastAwayInputDir.z = awayInput.moveZ;
+    }
+    if (this.transitionTimer > 0) {
+      this.transitionTimer = Math.max(0, this.transitionTimer - dt);
+    }
+    this.aiTickCounter += 1;
     const homeAssign = computeDefensiveAssignments(this.players, this.ball, "home");
     const awayAssign = computeDefensiveAssignments(this.players, this.ball, "away");
-    for (const p of this.players) {
+    const homeTransition = this.transitionTimer > 0 && this.lastPossessionTeam !== null ? this.lastPossessionTeam === "home" ? "attack" : "defend" : "none";
+    const awayTransition = this.transitionTimer > 0 && this.lastPossessionTeam !== null ? this.lastPossessionTeam === "away" ? "attack" : "defend" : "none";
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
       if (p.actionTimer > 0) {
         p.actionTimer = Math.max(0, p.actionTimer - dt);
         if (p.actionTimer === 0 && (p.actionState === "kick" || p.actionState === "tackle" || p.actionState === "dive")) {
@@ -2572,15 +3005,22 @@ var MatchEngine = class {
         const formation = p.team === "home" ? this.homeFormation : this.awayFormation;
         const mentality = p.team === "home" ? this.homeMentality : this.awayMentality;
         const assign = p.team === "home" ? homeAssign : awayAssign;
-        const steering = computeAiSteering(
-          p,
-          this.players,
-          this.ball,
-          formation,
-          assign.presserId,
-          assign.coverId,
-          mentality
-        );
+        const transition = p.team === "home" ? homeTransition : awayTransition;
+        const isUrgent = p.role === "GK" || p.hasBall || p.id === assign.presserId || transition !== "none" || !this.aiDecisionCache.has(p.id);
+        let steering = this.aiDecisionCache.get(p.id);
+        if (isUrgent || (this.aiTickCounter + i) % 3 === 0 || !steering) {
+          steering = computeAiSteering(
+            p,
+            this.players,
+            this.ball,
+            formation,
+            assign.presserId,
+            assign.coverId,
+            mentality,
+            transition
+          );
+          this.aiDecisionCache.set(p.id, steering);
+        }
         this.stepAiPlayer(p, steering, dt);
       }
       clampPlayerToArena(p.position);
@@ -2598,11 +3038,15 @@ var MatchEngine = class {
         else this.stats.awayPossessionSeconds += dt;
         const dirX = Math.sin(owner.facingAngle);
         const dirZ = Math.cos(owner.facingAngle);
-        const isSprinting = owner.actionState === "sprint";
-        const leadDist = DRIBBLE_OFFSET_DIST * (isSprinting ? 1.28 : 0.94);
+        const ownerSpeed = Math.hypot(owner.velocity.x, owner.velocity.z);
+        const isSprinting = owner.actionState === "sprint" || ownerSpeed > 7.4;
+        const speedNorm = Math.min(1, ownerSpeed / 9.8);
+        const stridePulse = isSprinting ? Math.sin(owner.animPhase * 1.1) * 0.08 : 0;
+        const leadDist = DRIBBLE_OFFSET_DIST * (0.86 + speedNorm * (isSprinting ? 0.48 : 0.16)) + stridePulse;
         const desiredBallX = owner.position.x + dirX * leadDist;
         const desiredBallZ = owner.position.z + dirZ * leadDist;
-        const followRate = Math.min(1, (16 + owner.attributes.dribbling * 0.14) * dt);
+        const controlTightness = isSprinting ? 11.5 : 16.5;
+        const followRate = Math.min(1, (controlTightness + owner.attributes.dribbling * 0.12) * dt);
         this.ball.position.x += (desiredBallX - this.ball.position.x) * followRate;
         this.ball.position.z += (desiredBallZ - this.ball.position.z) * followRate;
         this.ball.position.y = BALL_RADIUS;
@@ -2632,6 +3076,12 @@ var MatchEngine = class {
         return;
       }
       this.tryPickupLooseBall();
+      if (this.ball.ownerId === null) {
+        const blocker = resolveLooseBallBodyContact(this.ball, this.players);
+        if (blocker) {
+          this.emitSound({ type: "kick", power: 0.48 });
+        }
+      }
     }
     if (!this.awayHumanControl) {
       this.replayRecorder.record(this.ball, this.players, dt);
@@ -2846,17 +3296,13 @@ var MatchEngine = class {
       if (this.phase === "setpiece") return;
     }
     if (p.actionState !== "tackle") {
-      const dribbleRetention = p.hasBall ? 0.9 + p.attributes.dribbling / 100 * 0.06 : 1;
+      const dribbleRetention = p.hasBall ? 0.89 + p.attributes.dribbling / 100 * 0.06 : 1;
       const topSpeed = p.attributes.speed * (wantsSprint ? 1.32 : 1) * dribbleRetention;
       const targetVx = input.moveX * topSpeed;
       const targetVz = input.moveZ * topSpeed;
-      const accel = p.attributes.acceleration;
-      p.velocity.x += (targetVx - p.velocity.x) * Math.min(1, accel * dt);
-      p.velocity.z += (targetVz - p.velocity.z) * Math.min(1, accel * dt);
+      const targetAngle = moveMag > 0.1 ? Math.atan2(input.moveX, input.moveZ) : null;
+      stepPlayerLocomotion(p, targetVx, targetVz, targetAngle, dt, wantsSprint, p.hasBall);
       if (moveMag > 0.1) {
-        const targetAngle = Math.atan2(input.moveX, input.moveZ);
-        const turnRate = p.hasBall ? 10 + p.attributes.dribbling / 100 * 6 : 14;
-        p.facingAngle = lerpAngle(p.facingAngle, targetAngle, Math.min(1, turnRate * dt));
         if (p.actionTimer <= 0) {
           p.actionState = wantsSprint ? "sprint" : p.hasBall ? "dribble" : "run";
         }
@@ -2880,29 +3326,33 @@ var MatchEngine = class {
       }
       if (input.shootReleased || input.shootPressed) {
         const rawCharge = isHome ? this.shotCharge : this.awayShotCharge;
-        const charge = rawCharge > 0.03 ? rawCharge : 0.35;
+        const charge = rawCharge > 0.03 ? rawCharge : 0.24;
         if (isHome) this.shotCharge = 0;
         else this.awayShotCharge = 0;
         const targetGoalX = isHome ? HALF_LENGTH : -HALF_LENGTH;
-        const goalDirX = targetGoalX - p.position.x;
         const aimZ = Math.abs(input.moveZ) > 0.12 ? input.moveZ * 3.4 : 0;
-        const goalDirZ = aimZ - p.position.z;
-        const profile = computeShotProfile(p.attributes.shotPower, charge, wantsSprint);
-        const sideSpin = Math.abs(input.moveZ) > 0.15 ? Math.sign(input.moveZ) * 1.25 : 0;
+        const shot = computeContextualShot(
+          p,
+          targetGoalX,
+          aimZ,
+          charge,
+          this.players,
+          wantsSprint
+        );
         applyBallKick(
           this.ball,
-          goalDirX,
-          goalDirZ,
-          profile.horizontalSpeed,
-          profile.loftSpeed,
+          shot.dirX,
+          shot.dirZ,
+          shot.horizontalSpeed,
+          shot.loftSpeed,
           p,
-          sideSpin
+          shot.sideSpin
         );
         if (isHome) this.stats.homeShots += 1;
         else this.stats.awayShots += 1;
-        this.hitstopTimer = 0.035;
-        this.callbacks.onCameraTrauma(0.18 + charge * 0.2);
-        this.emitSound({ type: "kick", power: 1.05 + charge * 0.35 });
+        this.hitstopTimer = shot.shotKind === "power" ? 0.045 : 0.032;
+        this.callbacks.onCameraTrauma(0.16 + charge * 0.22);
+        this.emitSound({ type: "kick", power: 0.98 + charge * 0.42 });
         this.emitHudSnapshot();
         return;
       }
@@ -2910,24 +3360,23 @@ var MatchEngine = class {
         if (isHome) this.shotCharge = 0;
         else this.awayShotCharge = 0;
         const isLob = input.lobPressed;
-        const target = findBestPassTarget(p, this.players, input.moveX, input.moveZ);
+        const target = findBestPassTarget(p, this.players, input.moveX, input.moveZ, isLob);
         let dirX = moveMag > 0.15 ? input.moveX : Math.sin(p.facingAngle);
         let dirZ = moveMag > 0.15 ? input.moveZ : Math.cos(p.facingAngle);
-        let passSpeed = isLob ? 21 : 16;
-        let loft = isLob ? 7.2 : 0.55;
+        let passSpeed = isLob ? 20.5 : wantsSprint ? 19.2 : 14.8;
+        let loft = isLob ? 7.2 : wantsSprint ? 0.85 : 0.35;
         if (target) {
           const lead = computeLeadPassVector(p, target, isLob);
           const dist = Math.hypot(lead.dirX, lead.dirZ);
-          const inaccuracy = (100 - p.attributes.passing) / 100 * 0.055;
-          dirX = lead.dirX + (Math.random() - 0.5) * inaccuracy * dist;
-          dirZ = lead.dirZ + (Math.random() - 0.5) * inaccuracy * dist;
+          dirX = lead.dirX + (Math.random() - 0.5) * lead.spreadFactor * dist;
+          dirZ = lead.dirZ + (Math.random() - 0.5) * lead.spreadFactor * dist;
           passSpeed = lead.speed;
           loft = lead.loft;
         }
         applyBallKick(this.ball, dirX, dirZ, passSpeed, loft, p);
         if (isHome) this.stats.homePasses += 1;
         else this.stats.awayPasses += 1;
-        this.emitSound({ type: "kick", power: isLob ? 1 : 0.72 });
+        this.emitSound({ type: "kick", power: isLob ? 1 : passSpeed > 18 ? 0.86 : 0.68 });
         if (target && target.role !== "GK") {
           p.isControlled = false;
           target.isControlled = true;
@@ -2939,14 +3388,31 @@ var MatchEngine = class {
     }
   }
   stepAiPlayer(p, steering, dt) {
-    if (p.role === "GK" && steering.shouldDive && p.diveCooldown <= 0 && p.actionState !== "dive") {
-      p.actionState = "dive";
-      p.actionTimer = 0.48;
-      p.diveCooldown = 1.15;
-      p.diveDir = steering.diveDir;
-      p.facingAngle = p.team === "home" ? Math.PI / 2 : -Math.PI / 2;
-      p.velocity.x *= 0.25;
-      p.velocity.z = steering.diveDir * 7.6;
+    if (p.role === "GK") {
+      if (steering.shouldDive && p.diveCooldown <= 0 && p.actionState !== "dive") {
+        const prevReaction = this.gkDiveReactionTimer.get(p.id);
+        if (prevReaction === void 0) {
+          const distToBall = Math.hypot(
+            this.ball.position.x - p.position.x,
+            this.ball.position.z - p.position.z
+          );
+          const reactionDelay = distToBall < 12 ? 0.14 : 0.1;
+          this.gkDiveReactionTimer.set(p.id, reactionDelay);
+        } else if (prevReaction > 0) {
+          this.gkDiveReactionTimer.set(p.id, Math.max(0, prevReaction - dt));
+        } else {
+          this.gkDiveReactionTimer.delete(p.id);
+          p.actionState = "dive";
+          p.actionTimer = 0.48;
+          p.diveCooldown = 1.15;
+          p.diveDir = steering.diveDir;
+          p.facingAngle = p.team === "home" ? Math.PI / 2 : -Math.PI / 2;
+          p.velocity.x *= 0.25;
+          p.velocity.z = steering.diveDir * 7.6;
+        }
+      } else {
+        this.gkDiveReactionTimer.delete(p.id);
+      }
     }
     if (steering.shouldTackle && !p.hasBall && p.tackleCooldown <= 0 && p.actionState !== "tackle" && p.actionState !== "dive") {
       const ballOwner = this.ball.ownerId !== null ? this.players.find((pl) => pl.id === this.ball.ownerId) ?? null : null;
@@ -2988,22 +3454,25 @@ var MatchEngine = class {
         const nz = dz / dist;
         const maxSpeed = p.attributes.speed * (steering.sprint ? 1.18 : 0.92);
         const desiredSpeed = Math.min(maxSpeed, dist * 2.8);
-        p.velocity.x += (nx * desiredSpeed - p.velocity.x) * Math.min(1, 9 * dt);
-        p.velocity.z += (nz * desiredSpeed - p.velocity.z) * Math.min(1, 9 * dt);
         const targetAngle = Math.atan2(nx, nz);
-        p.facingAngle = lerpAngle(p.facingAngle, targetAngle, Math.min(1, 10 * dt));
+        stepPlayerLocomotion(
+          p,
+          nx * desiredSpeed,
+          nz * desiredSpeed,
+          targetAngle,
+          dt,
+          steering.sprint,
+          p.hasBall
+        );
         if (p.actionTimer <= 0) {
           p.actionState = p.hasBall ? "dribble" : steering.sprint ? "sprint" : "run";
         }
       } else {
-        p.velocity.x *= Math.pow(0.8, dt * 60);
-        p.velocity.z *= Math.pow(0.8, dt * 60);
-        if (p.actionTimer <= 0) p.actionState = "idle";
         const bdx = this.ball.position.x - p.position.x;
         const bdz = this.ball.position.z - p.position.z;
-        if (Math.hypot(bdx, bdz) > 0.5) {
-          p.facingAngle = lerpAngle(p.facingAngle, Math.atan2(bdx, bdz), Math.min(1, 8 * dt));
-        }
+        const lookAngle = Math.hypot(bdx, bdz) > 0.5 ? Math.atan2(bdx, bdz) : null;
+        stepPlayerLocomotion(p, 0, 0, lookAngle, dt, false, p.hasBall);
+        if (p.actionTimer <= 0) p.actionState = "idle";
       }
     }
     p.position.x += p.velocity.x * dt;
@@ -3019,7 +3488,7 @@ var MatchEngine = class {
         else this.stats.awayPasses += 1;
       }
       executeAiBallAction(p, this.ball, steering, this.players, (kind) => {
-        this.emitSound({ type: "kick", power: kind === "kick" ? 1.15 : 0.72 });
+        this.emitSound({ type: "kick", power: kind === "kick" ? 1.12 : 0.72 });
       });
     }
   }
@@ -3079,7 +3548,8 @@ var MatchEngine = class {
   }
   tryPickupLooseBall() {
     if (this.ball.pickupLockTimer > 0) return;
-    for (const p of this.players) {
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
       if (p.role !== "GK") continue;
       const incomingSpeed = Math.hypot(this.ball.velocity.x, this.ball.velocity.z);
       const wasOpponentShot = this.ball.lastTouchTeam !== null && this.ball.lastTouchTeam !== p.team;
@@ -3099,33 +3569,90 @@ var MatchEngine = class {
           else this.stats.awaySaves += 1;
           this.emitSound({ type: "crowd", reaction: "applause" });
         }
-        p.gkHoldTimer = 0.55;
+        p.gkHoldTimer = 0.75;
         this.claimBall(p);
         this.emitSound({ type: "kick", power: 0.55 });
         this.emitHudSnapshot();
         return;
       }
     }
-    if (this.ball.position.y > 1.7) return;
-    let closest = null;
-    let bestDist = DRIBBLE_CONTROL_RADIUS;
-    for (const p of this.players) {
+    if (this.ball.position.y > 1.92) return;
+    let closestReceiver = null;
+    let bestReceiverDist = DRIBBLE_CONTROL_RADIUS;
+    let closestInterceptor = null;
+    let bestInterceptDist = Infinity;
+    let closestBlocker = null;
+    let bestBlockDist = Infinity;
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
       if (p.role === "GK" || p.kickCooldown > 0) continue;
       const d = Math.hypot(
         this.ball.position.x - p.position.x,
         this.ball.position.z - p.position.z
       );
-      if (d < bestDist) {
-        bestDist = d;
-        closest = p;
+      if (this.ball.lastTouchTeam !== null && this.ball.lastTouchTeam !== p.team) {
+        const outcome = evaluateInterception(p, this.ball);
+        if (outcome === "intercept" && d < bestInterceptDist) {
+          bestInterceptDist = d;
+          closestInterceptor = p;
+        } else if (outcome === "block" && d < bestBlockDist) {
+          bestBlockDist = d;
+          closestBlocker = p;
+        }
+        continue;
+      }
+      if (this.ball.position.y <= 1.55 && d < bestReceiverDist) {
+        bestReceiverDist = d;
+        closestReceiver = p;
       }
     }
-    if (closest) {
-      this.claimBall(closest);
+    if (!closestReceiver && !closestInterceptor && closestBlocker) {
+      const bx = this.ball.position.x - closestBlocker.position.x;
+      const bz = this.ball.position.z - closestBlocker.position.z;
+      const len = Math.hypot(bx, bz) || 1;
+      this.ball.velocity.x = bx / len * 6.2 + closestBlocker.velocity.x * 0.3;
+      this.ball.velocity.z = bz / len * 6.2 + closestBlocker.velocity.z * 0.3;
+      this.ball.velocity.y = 2.1;
+      this.ball.pickupLockTimer = 0.16;
+      this.ball.lastTouchTeam = closestBlocker.team;
+      this.ball.lastTouchPlayerName = closestBlocker.name;
+      closestBlocker.kickCooldown = 0.2;
+      this.emitSound({ type: "kick", power: 0.72 });
+      return;
+    }
+    const winner = closestReceiver && closestInterceptor ? bestReceiverDist <= bestInterceptDist ? closestReceiver : closestInterceptor : closestReceiver ?? closestInterceptor;
+    if (!winner) return;
+    const inputDir = winner.isControlled && winner.team === "home" ? this.lastHomeInputDir : winner.isControlled && winner.team === "away" ? this.lastAwayInputDir : { x: 0, z: 0 };
+    const reception = evaluateBallReception(winner, this.ball, inputDir.x, inputDir.z);
+    if (reception.outcome === "heavy_touch") {
+      this.ball.position.x = winner.position.x + reception.touchDirX * reception.touchOffsetMeters;
+      this.ball.position.z = winner.position.z + reception.touchDirZ * reception.touchOffsetMeters;
+      this.ball.position.y = BALL_RADIUS + 0.08;
+      this.ball.velocity.x = reception.touchDirX * reception.deflectSpeed;
+      this.ball.velocity.z = reception.touchDirZ * reception.deflectSpeed;
+      this.ball.velocity.y = 1.4;
+      this.ball.pickupLockTimer = 0.14;
+      this.ball.lastTouchTeam = winner.team;
+      this.ball.lastTouchPlayerName = winner.name;
+      this.emitSound({ type: "kick", power: 0.55 });
+      return;
+    }
+    this.claimBall(winner);
+    this.ball.position.x = winner.position.x + reception.touchDirX * reception.touchOffsetMeters;
+    this.ball.position.z = winner.position.z + reception.touchDirZ * reception.touchOffsetMeters;
+    this.ball.position.y = BALL_RADIUS;
+    if (Math.hypot(reception.touchDirX, reception.touchDirZ) > 0.1) {
+      const touchAngle = Math.atan2(reception.touchDirX, reception.touchDirZ);
+      winner.facingAngle = lerpAngle(winner.facingAngle, touchAngle, 0.45);
     }
   }
   claimBall(player) {
-    for (const p of this.players) {
+    if (this.lastPossessionTeam !== null && this.lastPossessionTeam !== player.team) {
+      this.transitionTimer = 1.65;
+    }
+    this.lastPossessionTeam = player.team;
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
       p.hasBall = p.id === player.id;
     }
     this.ball.ownerId = player.id;
@@ -3133,12 +3660,14 @@ var MatchEngine = class {
     this.ball.lastTouchPlayerName = player.name;
     if (player.team === "home" && player.role !== "GK" && !player.isControlled) {
       this.shotCharge = 0;
-      for (const p of this.players) {
+      for (let i = 0; i < this.players.length; i++) {
+        const p = this.players[i];
         if (p.team === "home") p.isControlled = p.id === player.id;
       }
     } else if (player.team === "away" && this.awayHumanControl && player.role !== "GK" && !player.isControlled) {
       this.awayShotCharge = 0;
-      for (const p of this.players) {
+      for (let i = 0; i < this.players.length; i++) {
+        const p = this.players[i];
         if (p.team === "away") p.isControlled = p.id === player.id;
       }
     }

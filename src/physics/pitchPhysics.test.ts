@@ -1,14 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BALL_RADIUS, GOAL_HEIGHT, HALF_LENGTH, HALF_WIDTH } from '../core/constants';
+import { BALL_RADIUS, GOAL_HEIGHT, HALF_LENGTH, HALF_WIDTH, PLAYER_RADIUS } from '../core/constants';
 import { BallState, PlayerState } from '../core/types';
 import {
   applyBallKick,
   attemptGoalkeeperSave,
+  computeContextualShot,
   computeShotProfile,
+  evaluateBallReception,
   predictBallCrossingX,
+  resolveLooseBallBodyContact,
   resolvePlayerCollisions,
   stepBallPhysics,
+  stepPlayerLocomotion,
 } from './pitchPhysics';
 
 function makeBall(overrides: Partial<BallState> = {}): BallState {
@@ -185,3 +189,116 @@ test('attemptGoalkeeperSave parries hard opponent shots and catches softer shots
   });
   assert.equal(attemptGoalkeeperSave(gk, softShot), 'catch');
 });
+
+test('computeContextualShot differentiates quick, power, moving, and pressured shots with realistic accuracy', () => {
+  const shooter = makeDummyPlayer('home_9', 36, 0);
+  shooter.facingAngle = Math.PI / 2; // square toward +X goal
+  shooter.velocity = { x: 0, y: 0, z: 0 };
+
+  const farDefender = makeDummyPlayer('away_2', 10, 0);
+  farDefender.team = 'away';
+
+  const quickShot = computeContextualShot(shooter, HALF_LENGTH, 1.0, 0.15, [shooter, farDefender], false, 0, 0);
+  const powerShot = computeContextualShot(shooter, HALF_LENGTH, 1.0, 0.85, [shooter, farDefender], false, 0, 0);
+
+  assert.equal(quickShot.shotKind, 'quick');
+  assert.equal(powerShot.shotKind, 'power');
+  assert.ok(powerShot.horizontalSpeed > quickShot.horizontalSpeed);
+  assert.ok(powerShot.loftSpeed > quickShot.loftSpeed);
+  assert.ok(quickShot.accuracyFactor > powerShot.accuracyFactor);
+
+  // Moving/sprinting shot has lower accuracy than a composed standing shot
+  shooter.velocity = { x: 8.4, y: 0, z: 1.5 };
+  const movingShot = computeContextualShot(shooter, HALF_LENGTH, 1.0, 0.45, [shooter, farDefender], true, 0, 0);
+  assert.equal(movingShot.shotKind, 'moving');
+
+  // Pressured shot when defender is right in front (< 1.5m)
+  const tightDefender = makeDummyPlayer('away_3', 37.2, 0.3);
+  tightDefender.team = 'away';
+  const pressuredShot = computeContextualShot(shooter, HALF_LENGTH, 1.0, 0.45, [shooter, tightDefender], false, 0, 0);
+  assert.equal(pressuredShot.shotKind, 'pressured');
+  assert.ok(pressuredShot.pressureLevel >= 0.48);
+  assert.ok(pressuredShot.accuracyFactor < quickShot.accuracyFactor);
+
+  // Back-to-goal shot loses accuracy and pace compared to square body alignment
+  shooter.velocity = { x: 0, y: 0, z: 0 };
+  shooter.facingAngle = -Math.PI / 2;
+  const backToGoal = computeContextualShot(shooter, HALF_LENGTH, 0, 0.5, [shooter, farDefender], false, 0, 0);
+  assert.ok(backToGoal.accuracyFactor < quickShot.accuracyFactor);
+  assert.ok(backToGoal.horizontalSpeed < powerShot.horizontalSpeed);
+});
+
+test('stepPlayerLocomotion enforces braking inertia on 180-degree reversal at sprint speed', () => {
+  const sprinter = makeDummyPlayer('home_9', 0, 0);
+  sprinter.velocity = { x: 8.8, y: 0, z: 0 };
+  sprinter.facingAngle = Math.PI / 2;
+
+  // Attempt sudden 180-degree reversal while sprinting
+  const res = stepPlayerLocomotion(sprinter, -8.8, 0, -Math.PI / 2, 1 / 60, true, true);
+  assert.equal(res.isTurningHard, true);
+  assert.ok(sprinter.velocity.x > 5.0, 'Player must brake through inertia instead of snapping instantaneously to -8.8 m/s');
+  assert.ok(Math.abs(sprinter.facingAngle - -Math.PI / 2) > 1.0, 'Turning angle should rotate smoothly, not snap 180 deg in 1 frame');
+});
+
+test('evaluateBallReception adapts first-touch distance to speed/sprint and triggers heavy_touch on scorching opponent shots', () => {
+  const receiver = makeDummyPlayer('home_7', 10, 0);
+  receiver.hasBall = false;
+  receiver.facingAngle = Math.PI / 2;
+  receiver.velocity = { x: 0.5, y: 0, z: 0 };
+  receiver.actionState = 'idle';
+
+  const gentlePass = makeBall({
+    position: { x: 10.6, y: BALL_RADIUS, z: 0 },
+    velocity: { x: -7, y: 0, z: 0 },
+    lastTouchTeam: 'home',
+  });
+  const calmTouch = evaluateBallReception(receiver, gentlePass, 1, 0);
+  assert.equal(calmTouch.outcome, 'control');
+  assert.ok(calmTouch.touchDirX > 0.9);
+
+  // Sprinting reception pushes the first touch slightly further ahead
+  receiver.velocity = { x: 8.6, y: 0, z: 0 };
+  receiver.actionState = 'sprint';
+  const fastPass = makeBall({
+    position: { x: 10.7, y: 0.95, z: 0 },
+    velocity: { x: 15, y: 0, z: 0 },
+    lastTouchTeam: 'home',
+  });
+  const sprintTouch = evaluateBallReception(receiver, fastPass, 1, 0);
+  assert.equal(sprintTouch.outcome, 'control');
+  assert.ok(
+    sprintTouch.touchOffsetMeters > calmTouch.touchOffsetMeters,
+    `Sprint reception (${sprintTouch.touchOffsetMeters}) should have looser cushion than calm reception (${calmTouch.touchOffsetMeters})`,
+  );
+
+  // Very fast awkward opponent strike causes a heavy touch instead of instant magnetic glue
+  receiver.facingAngle = -Math.PI / 2;
+  const rocketShot = makeBall({
+    position: { x: 10.5, y: 1.1, z: 0 },
+    velocity: { x: 25, y: 0, z: 0 },
+    lastTouchTeam: 'away',
+  });
+  const heavy = evaluateBallReception(receiver, rocketShot, 0, 1);
+  assert.equal(heavy.outcome, 'heavy_touch');
+  assert.ok(heavy.deflectSpeed > 0);
+});
+
+test('resolveLooseBallBodyContact prevents free ball from clipping through outfield players', () => {
+  const blocker = makeDummyPlayer('away_4', 20, 0);
+  blocker.team = 'away';
+  blocker.hasBall = false;
+  blocker.kickCooldown = 0;
+
+  const ball = makeBall({
+    position: { x: 19.7, y: 0.5, z: 0 },
+    velocity: { x: 18, y: 0, z: 0 },
+    lastTouchTeam: 'home',
+  });
+
+  const hitPlayer = resolveLooseBallBodyContact(ball, [blocker]);
+  assert.equal(hitPlayer?.id, blocker.id);
+  const sep = Math.hypot(ball.position.x - blocker.position.x, ball.position.z - blocker.position.z);
+  assert.ok(sep >= PLAYER_RADIUS + BALL_RADIUS, 'Ball must be pushed outside player body radius');
+  assert.ok(ball.velocity.x < 0, 'Incoming ball hitting front of player must deflect back');
+});
+

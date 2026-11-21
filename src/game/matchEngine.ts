@@ -1,8 +1,10 @@
 import {
+  AiSteeringOutput,
   computeAiSteering,
   computeDefensiveAssignments,
   computeSetPieceAiDecision,
   executeAiBallAction,
+  TeamTransitionMode,
 } from '../ai/basicAi';
 import { computeCrowdIntensity } from '../audio/crowdLogic';
 import { soundEngine } from '../audio/soundEngine';
@@ -44,6 +46,7 @@ import {
   computeMatchClock,
   computeSetPieceSetup,
   createTeamPlayers,
+  evaluateInterception,
   findBestPassTarget,
   getRestartPositionForOutOfBounds,
   isCleanTackleAngle,
@@ -54,9 +57,13 @@ import {
   applyBallKick,
   attemptGoalkeeperSave,
   clampPlayerToArena,
+  computeContextualShot,
   computeShotProfile,
+  evaluateBallReception,
+  resolveLooseBallBodyContact,
   resolvePlayerCollisions,
   stepBallPhysics,
+  stepPlayerLocomotion,
 } from '../physics/pitchPhysics';
 
 export interface MatchEngineCallbacks {
@@ -125,6 +132,15 @@ export class MatchEngine {
     null;
   private netPlayerTargets: Map<string, NetPlayerTarget> = new Map();
   private hasReceivedNetSnapshot = false;
+
+  // Lightweight AI caching, turnover transition tracking, and GK human reaction timers
+  private aiDecisionCache: Map<string, AiSteeringOutput> = new Map();
+  private aiTickCounter = 0;
+  private lastPossessionTeam: TeamSide | null = null;
+  private transitionTimer = 0;
+  private gkDiveReactionTimer: Map<string, number> = new Map();
+  private lastHomeInputDir = { x: 0, z: 0 };
+  private lastAwayInputDir = { x: 0, z: 0 };
 
   public getShotCharge(side: TeamSide = this.localSide): number {
     return side === 'away' ? this.awayShotCharge : this.shotCharge;
@@ -267,6 +283,11 @@ export class MatchEngine {
     this.isReplaying = false;
     this.netBallTarget = null;
     this.netPlayerTargets.clear();
+    this.aiDecisionCache.clear();
+    this.gkDiveReactionTimer.clear();
+    this.aiTickCounter = 0;
+    this.lastPossessionTeam = null;
+    this.transitionTimer = 0;
     this.hasReceivedNetSnapshot = false;
     this.replayRecorder.clear();
     resetForKickoff(
@@ -747,10 +768,36 @@ export class MatchEngine {
       }
     }
 
+    this.lastHomeInputDir.x = input.moveX;
+    this.lastHomeInputDir.z = input.moveZ;
+    if (awayInput) {
+      this.lastAwayInputDir.x = awayInput.moveX;
+      this.lastAwayInputDir.z = awayInput.moveZ;
+    }
+
+    if (this.transitionTimer > 0) {
+      this.transitionTimer = Math.max(0, this.transitionTimer - dt);
+    }
+    this.aiTickCounter += 1;
+
     const homeAssign = computeDefensiveAssignments(this.players, this.ball, 'home');
     const awayAssign = computeDefensiveAssignments(this.players, this.ball, 'away');
 
-    for (const p of this.players) {
+    const homeTransition: TeamTransitionMode =
+      this.transitionTimer > 0 && this.lastPossessionTeam !== null
+        ? this.lastPossessionTeam === 'home'
+          ? 'attack'
+          : 'defend'
+        : 'none';
+    const awayTransition: TeamTransitionMode =
+      this.transitionTimer > 0 && this.lastPossessionTeam !== null
+        ? this.lastPossessionTeam === 'away'
+          ? 'attack'
+          : 'defend'
+        : 'none';
+
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
       if (p.actionTimer > 0) {
         p.actionTimer = Math.max(0, p.actionTimer - dt);
         if (
@@ -774,15 +821,29 @@ export class MatchEngine {
         const formation = p.team === 'home' ? this.homeFormation : this.awayFormation;
         const mentality = p.team === 'home' ? this.homeMentality : this.awayMentality;
         const assign = p.team === 'home' ? homeAssign : awayAssign;
-        const steering = computeAiSteering(
-          p,
-          this.players,
-          this.ball,
-          formation,
-          assign.presserId,
-          assign.coverId,
-          mentality,
-        );
+        const transition = p.team === 'home' ? homeTransition : awayTransition;
+
+        // Refresh urgent AI every tick (GK, ball carrier, presser, transition); stagger off-ball AI every 3 ticks for mobile CPU efficiency
+        const isUrgent =
+          p.role === 'GK' ||
+          p.hasBall ||
+          p.id === assign.presserId ||
+          transition !== 'none' ||
+          !this.aiDecisionCache.has(p.id);
+        let steering = this.aiDecisionCache.get(p.id);
+        if (isUrgent || (this.aiTickCounter + i) % 3 === 0 || !steering) {
+          steering = computeAiSteering(
+            p,
+            this.players,
+            this.ball,
+            formation,
+            assign.presserId,
+            assign.coverId,
+            mentality,
+            transition,
+          );
+          this.aiDecisionCache.set(p.id, steering);
+        }
         this.stepAiPlayer(p, steering, dt);
       }
 
@@ -804,11 +865,17 @@ export class MatchEngine {
 
         const dirX = Math.sin(owner.facingAngle);
         const dirZ = Math.cos(owner.facingAngle);
-        const isSprinting = owner.actionState === 'sprint';
-        const leadDist = DRIBBLE_OFFSET_DIST * (isSprinting ? 1.28 : 0.94);
+        const ownerSpeed = Math.hypot(owner.velocity.x, owner.velocity.z);
+        const isSprinting = owner.actionState === 'sprint' || ownerSpeed > 7.4;
+        const speedNorm = Math.min(1, ownerSpeed / 9.8);
+        // Tighter close control when slow; longer push-ahead touches with stride cadence when sprinting
+        const stridePulse = isSprinting ? Math.sin(owner.animPhase * 1.1) * 0.08 : 0;
+        const leadDist =
+          DRIBBLE_OFFSET_DIST * (0.86 + speedNorm * (isSprinting ? 0.48 : 0.16)) + stridePulse;
         const desiredBallX = owner.position.x + dirX * leadDist;
         const desiredBallZ = owner.position.z + dirZ * leadDist;
-        const followRate = Math.min(1, (16 + owner.attributes.dribbling * 0.14) * dt);
+        const controlTightness = isSprinting ? 11.5 : 16.5;
+        const followRate = Math.min(1, (controlTightness + owner.attributes.dribbling * 0.12) * dt);
 
         this.ball.position.x += (desiredBallX - this.ball.position.x) * followRate;
         this.ball.position.z += (desiredBallZ - this.ball.position.z) * followRate;
@@ -842,6 +909,14 @@ export class MatchEngine {
       }
 
       this.tryPickupLooseBall();
+
+      // Prevent loose balls from ever ghosting through players when not picked up
+      if (this.ball.ownerId === null) {
+        const blocker = resolveLooseBallBodyContact(this.ball, this.players);
+        if (blocker) {
+          this.emitSound({ type: 'kick', power: 0.48 });
+        }
+      }
     }
 
     if (!this.awayHumanControl) {
@@ -1088,20 +1163,16 @@ export class MatchEngine {
 
     if (p.actionState !== 'tackle') {
       const dribbleRetention = p.hasBall
-        ? 0.9 + (p.attributes.dribbling / 100) * 0.06
+        ? 0.89 + (p.attributes.dribbling / 100) * 0.06
         : 1.0;
       const topSpeed = p.attributes.speed * (wantsSprint ? 1.32 : 1.0) * dribbleRetention;
       const targetVx = input.moveX * topSpeed;
       const targetVz = input.moveZ * topSpeed;
-      const accel = p.attributes.acceleration;
+      const targetAngle = moveMag > 0.1 ? Math.atan2(input.moveX, input.moveZ) : null;
 
-      p.velocity.x += (targetVx - p.velocity.x) * Math.min(1, accel * dt);
-      p.velocity.z += (targetVz - p.velocity.z) * Math.min(1, accel * dt);
+      stepPlayerLocomotion(p, targetVx, targetVz, targetAngle, dt, wantsSprint, p.hasBall);
 
       if (moveMag > 0.1) {
-        const targetAngle = Math.atan2(input.moveX, input.moveZ);
-        const turnRate = p.hasBall ? 10 + (p.attributes.dribbling / 100) * 6 : 14;
-        p.facingAngle = lerpAngle(p.facingAngle, targetAngle, Math.min(1, turnRate * dt));
         if (p.actionTimer <= 0) {
           p.actionState = wantsSprint ? 'sprint' : p.hasBall ? 'dribble' : 'run';
         }
@@ -1128,31 +1199,35 @@ export class MatchEngine {
 
       if (input.shootReleased || input.shootPressed) {
         const rawCharge = isHome ? this.shotCharge : this.awayShotCharge;
-        const charge = rawCharge > 0.03 ? rawCharge : 0.35;
+        const charge = rawCharge > 0.03 ? rawCharge : 0.24;
         if (isHome) this.shotCharge = 0;
         else this.awayShotCharge = 0;
 
         const targetGoalX = isHome ? HALF_LENGTH : -HALF_LENGTH;
-        const goalDirX = targetGoalX - p.position.x;
         const aimZ = Math.abs(input.moveZ) > 0.12 ? input.moveZ * 3.4 : 0;
-        const goalDirZ = aimZ - p.position.z;
-        const profile = computeShotProfile(p.attributes.shotPower, charge, wantsSprint);
-        const sideSpin = Math.abs(input.moveZ) > 0.15 ? Math.sign(input.moveZ) * 1.25 : 0;
+        const shot = computeContextualShot(
+          p,
+          targetGoalX,
+          aimZ,
+          charge,
+          this.players,
+          wantsSprint,
+        );
 
         applyBallKick(
           this.ball,
-          goalDirX,
-          goalDirZ,
-          profile.horizontalSpeed,
-          profile.loftSpeed,
+          shot.dirX,
+          shot.dirZ,
+          shot.horizontalSpeed,
+          shot.loftSpeed,
           p,
-          sideSpin,
+          shot.sideSpin,
         );
         if (isHome) this.stats.homeShots += 1;
         else this.stats.awayShots += 1;
-        this.hitstopTimer = 0.035;
-        this.callbacks.onCameraTrauma(0.18 + charge * 0.2);
-        this.emitSound({ type: 'kick', power: 1.05 + charge * 0.35 });
+        this.hitstopTimer = shot.shotKind === 'power' ? 0.045 : 0.032;
+        this.callbacks.onCameraTrauma(0.16 + charge * 0.22);
+        this.emitSound({ type: 'kick', power: 0.98 + charge * 0.42 });
         this.emitHudSnapshot();
         return;
       }
@@ -1161,18 +1236,17 @@ export class MatchEngine {
         if (isHome) this.shotCharge = 0;
         else this.awayShotCharge = 0;
         const isLob = input.lobPressed;
-        const target = findBestPassTarget(p, this.players, input.moveX, input.moveZ);
+        const target = findBestPassTarget(p, this.players, input.moveX, input.moveZ, isLob);
         let dirX = moveMag > 0.15 ? input.moveX : Math.sin(p.facingAngle);
         let dirZ = moveMag > 0.15 ? input.moveZ : Math.cos(p.facingAngle);
-        let passSpeed = isLob ? 21 : 16;
-        let loft = isLob ? 7.2 : 0.55;
+        let passSpeed = isLob ? 20.5 : wantsSprint ? 19.2 : 14.8;
+        let loft = isLob ? 7.2 : wantsSprint ? 0.85 : 0.35;
 
         if (target) {
           const lead = computeLeadPassVector(p, target, isLob);
           const dist = Math.hypot(lead.dirX, lead.dirZ);
-          const inaccuracy = ((100 - p.attributes.passing) / 100) * 0.055;
-          dirX = lead.dirX + (Math.random() - 0.5) * inaccuracy * dist;
-          dirZ = lead.dirZ + (Math.random() - 0.5) * inaccuracy * dist;
+          dirX = lead.dirX + (Math.random() - 0.5) * lead.spreadFactor * dist;
+          dirZ = lead.dirZ + (Math.random() - 0.5) * lead.spreadFactor * dist;
           passSpeed = lead.speed;
           loft = lead.loft;
         }
@@ -1180,7 +1254,7 @@ export class MatchEngine {
         applyBallKick(this.ball, dirX, dirZ, passSpeed, loft, p);
         if (isHome) this.stats.homePasses += 1;
         else this.stats.awayPasses += 1;
-        this.emitSound({ type: 'kick', power: isLob ? 1.0 : 0.72 });
+        this.emitSound({ type: 'kick', power: isLob ? 1.0 : passSpeed > 18 ? 0.86 : 0.68 });
 
         if (target && target.role !== 'GK') {
           p.isControlled = false;
@@ -1195,22 +1269,35 @@ export class MatchEngine {
 
   private stepAiPlayer(
     p: PlayerState,
-    steering: ReturnType<typeof computeAiSteering>,
+    steering: AiSteeringOutput,
     dt: number,
   ): void {
-    if (
-      p.role === 'GK' &&
-      steering.shouldDive &&
-      p.diveCooldown <= 0 &&
-      p.actionState !== 'dive'
-    ) {
-      p.actionState = 'dive';
-      p.actionTimer = 0.48;
-      p.diveCooldown = 1.15;
-      p.diveDir = steering.diveDir;
-      p.facingAngle = p.team === 'home' ? Math.PI / 2 : -Math.PI / 2;
-      p.velocity.x *= 0.25;
-      p.velocity.z = steering.diveDir * 7.6;
+    if (p.role === 'GK') {
+      if (steering.shouldDive && p.diveCooldown <= 0 && p.actionState !== 'dive') {
+        // Coherent human GK reaction time (0.11s..0.16s) instead of robotic frame-0 instant dive
+        const prevReaction = this.gkDiveReactionTimer.get(p.id);
+        if (prevReaction === undefined) {
+          const distToBall = Math.hypot(
+            this.ball.position.x - p.position.x,
+            this.ball.position.z - p.position.z,
+          );
+          const reactionDelay = distToBall < 12 ? 0.14 : 0.1;
+          this.gkDiveReactionTimer.set(p.id, reactionDelay);
+        } else if (prevReaction > 0) {
+          this.gkDiveReactionTimer.set(p.id, Math.max(0, prevReaction - dt));
+        } else {
+          this.gkDiveReactionTimer.delete(p.id);
+          p.actionState = 'dive';
+          p.actionTimer = 0.48;
+          p.diveCooldown = 1.15;
+          p.diveDir = steering.diveDir;
+          p.facingAngle = p.team === 'home' ? Math.PI / 2 : -Math.PI / 2;
+          p.velocity.x *= 0.25;
+          p.velocity.z = steering.diveDir * 7.6;
+        }
+      } else {
+        this.gkDiveReactionTimer.delete(p.id);
+      }
     }
 
     if (
@@ -1268,22 +1355,25 @@ export class MatchEngine {
         const nz = dz / dist;
         const maxSpeed = p.attributes.speed * (steering.sprint ? 1.18 : 0.92);
         const desiredSpeed = Math.min(maxSpeed, dist * 2.8);
-        p.velocity.x += (nx * desiredSpeed - p.velocity.x) * Math.min(1, 9 * dt);
-        p.velocity.z += (nz * desiredSpeed - p.velocity.z) * Math.min(1, 9 * dt);
         const targetAngle = Math.atan2(nx, nz);
-        p.facingAngle = lerpAngle(p.facingAngle, targetAngle, Math.min(1, 10 * dt));
+        stepPlayerLocomotion(
+          p,
+          nx * desiredSpeed,
+          nz * desiredSpeed,
+          targetAngle,
+          dt,
+          steering.sprint,
+          p.hasBall,
+        );
         if (p.actionTimer <= 0) {
           p.actionState = p.hasBall ? 'dribble' : steering.sprint ? 'sprint' : 'run';
         }
       } else {
-        p.velocity.x *= Math.pow(0.8, dt * 60);
-        p.velocity.z *= Math.pow(0.8, dt * 60);
-        if (p.actionTimer <= 0) p.actionState = 'idle';
         const bdx = this.ball.position.x - p.position.x;
         const bdz = this.ball.position.z - p.position.z;
-        if (Math.hypot(bdx, bdz) > 0.5) {
-          p.facingAngle = lerpAngle(p.facingAngle, Math.atan2(bdx, bdz), Math.min(1, 8 * dt));
-        }
+        const lookAngle = Math.hypot(bdx, bdz) > 0.5 ? Math.atan2(bdx, bdz) : null;
+        stepPlayerLocomotion(p, 0, 0, lookAngle, dt, false, p.hasBall);
+        if (p.actionTimer <= 0) p.actionState = 'idle';
       }
     }
 
@@ -1301,7 +1391,7 @@ export class MatchEngine {
         else this.stats.awayPasses += 1;
       }
       executeAiBallAction(p, this.ball, steering, this.players, (kind) => {
-        this.emitSound({ type: 'kick', power: kind === 'kick' ? 1.15 : 0.72 });
+        this.emitSound({ type: 'kick', power: kind === 'kick' ? 1.12 : 0.72 });
       });
     }
   }
@@ -1369,7 +1459,8 @@ export class MatchEngine {
   private tryPickupLooseBall(): void {
     if (this.ball.pickupLockTimer > 0) return;
 
-    for (const p of this.players) {
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
       if (p.role !== 'GK') continue;
       const incomingSpeed = Math.hypot(this.ball.velocity.x, this.ball.velocity.z);
       const wasOpponentShot = this.ball.lastTouchTeam !== null && this.ball.lastTouchTeam !== p.team;
@@ -1389,7 +1480,7 @@ export class MatchEngine {
           else this.stats.awaySaves += 1;
           this.emitSound({ type: 'crowd', reaction: 'applause' });
         }
-        p.gkHoldTimer = 0.55;
+        p.gkHoldTimer = 0.75;
         this.claimBall(p);
         this.emitSound({ type: 'kick', power: 0.55 });
         this.emitHudSnapshot();
@@ -1397,30 +1488,112 @@ export class MatchEngine {
       }
     }
 
-    if (this.ball.position.y > 1.7) return;
+    if (this.ball.position.y > 1.92) return;
 
-    let closest: PlayerState | null = null;
-    let bestDist = DRIBBLE_CONTROL_RADIUS;
+    let closestReceiver: PlayerState | null = null;
+    let bestReceiverDist = DRIBBLE_CONTROL_RADIUS;
+    let closestInterceptor: PlayerState | null = null;
+    let bestInterceptDist = Infinity;
+    let closestBlocker: PlayerState | null = null;
+    let bestBlockDist = Infinity;
 
-    for (const p of this.players) {
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
       if (p.role === 'GK' || p.kickCooldown > 0) continue;
+
       const d = Math.hypot(
         this.ball.position.x - p.position.x,
         this.ball.position.z - p.position.z,
       );
-      if (d < bestDist) {
-        bestDist = d;
-        closest = p;
+
+      // Opponent pass/shot: enforce realistic non-magnetic interception/block rules
+      if (this.ball.lastTouchTeam !== null && this.ball.lastTouchTeam !== p.team) {
+        const outcome = evaluateInterception(p, this.ball);
+        if (outcome === 'intercept' && d < bestInterceptDist) {
+          bestInterceptDist = d;
+          closestInterceptor = p;
+        } else if (outcome === 'block' && d < bestBlockDist) {
+          bestBlockDist = d;
+          closestBlocker = p;
+        }
+        continue;
+      }
+
+      // Teammate pass reception or neutral loose ball
+      if (this.ball.position.y <= 1.55 && d < bestReceiverDist) {
+        bestReceiverDist = d;
+        closestReceiver = p;
       }
     }
 
-    if (closest) {
-      this.claimBall(closest);
+    // Physical block of a fast/high opponent strike
+    if (!closestReceiver && !closestInterceptor && closestBlocker) {
+      const bx = this.ball.position.x - closestBlocker.position.x;
+      const bz = this.ball.position.z - closestBlocker.position.z;
+      const len = Math.hypot(bx, bz) || 1;
+      this.ball.velocity.x = (bx / len) * 6.2 + closestBlocker.velocity.x * 0.3;
+      this.ball.velocity.z = (bz / len) * 6.2 + closestBlocker.velocity.z * 0.3;
+      this.ball.velocity.y = 2.1;
+      this.ball.pickupLockTimer = 0.16;
+      this.ball.lastTouchTeam = closestBlocker.team;
+      this.ball.lastTouchPlayerName = closestBlocker.name;
+      closestBlocker.kickCooldown = 0.2;
+      this.emitSound({ type: 'kick', power: 0.72 });
+      return;
+    }
+
+    const winner =
+      closestReceiver && closestInterceptor
+        ? bestReceiverDist <= bestInterceptDist
+          ? closestReceiver
+          : closestInterceptor
+        : closestReceiver ?? closestInterceptor;
+
+    if (!winner) return;
+
+    const inputDir =
+      winner.isControlled && winner.team === 'home'
+        ? this.lastHomeInputDir
+        : winner.isControlled && winner.team === 'away'
+          ? this.lastAwayInputDir
+          : { x: 0, z: 0 };
+
+    const reception = evaluateBallReception(winner, this.ball, inputDir.x, inputDir.z);
+    if (reception.outcome === 'heavy_touch') {
+      // Difficult fast reception knocks the ball realistically into space instead of magnetic glue
+      this.ball.position.x = winner.position.x + reception.touchDirX * reception.touchOffsetMeters;
+      this.ball.position.z = winner.position.z + reception.touchDirZ * reception.touchOffsetMeters;
+      this.ball.position.y = BALL_RADIUS + 0.08;
+      this.ball.velocity.x = reception.touchDirX * reception.deflectSpeed;
+      this.ball.velocity.z = reception.touchDirZ * reception.deflectSpeed;
+      this.ball.velocity.y = 1.4;
+      this.ball.pickupLockTimer = 0.14;
+      this.ball.lastTouchTeam = winner.team;
+      this.ball.lastTouchPlayerName = winner.name;
+      this.emitSound({ type: 'kick', power: 0.55 });
+      return;
+    }
+
+    this.claimBall(winner);
+    // Apply realistic first-touch cushion adapted to movement direction & reception difficulty
+    this.ball.position.x = winner.position.x + reception.touchDirX * reception.touchOffsetMeters;
+    this.ball.position.z = winner.position.z + reception.touchDirZ * reception.touchOffsetMeters;
+    this.ball.position.y = BALL_RADIUS;
+    if (Math.hypot(reception.touchDirX, reception.touchDirZ) > 0.1) {
+      const touchAngle = Math.atan2(reception.touchDirX, reception.touchDirZ);
+      winner.facingAngle = lerpAngle(winner.facingAngle, touchAngle, 0.45);
     }
   }
 
   private claimBall(player: PlayerState): void {
-    for (const p of this.players) {
+    if (this.lastPossessionTeam !== null && this.lastPossessionTeam !== player.team) {
+      // Possession turnover -> trigger collective attack/defend transition reactions
+      this.transitionTimer = 1.65;
+    }
+    this.lastPossessionTeam = player.team;
+
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
       p.hasBall = p.id === player.id;
     }
     this.ball.ownerId = player.id;
@@ -1429,7 +1602,8 @@ export class MatchEngine {
 
     if (player.team === 'home' && player.role !== 'GK' && !player.isControlled) {
       this.shotCharge = 0;
-      for (const p of this.players) {
+      for (let i = 0; i < this.players.length; i++) {
+        const p = this.players[i];
         if (p.team === 'home') p.isControlled = p.id === player.id;
       }
     } else if (
@@ -1439,7 +1613,8 @@ export class MatchEngine {
       !player.isControlled
     ) {
       this.awayShotCharge = 0;
-      for (const p of this.players) {
+      for (let i = 0; i < this.players.length; i++) {
+        const p = this.players[i];
         if (p.team === 'away') p.isControlled = p.id === player.id;
       }
     }

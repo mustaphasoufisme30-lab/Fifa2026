@@ -12,9 +12,11 @@ import { TEAMS } from '../teams/teams';
 import { ReplayRecorder } from './replayRecorder';
 import {
   classifyTackleFoul,
+  computeLeadPassVector,
   computeMatchClock,
   computeSetPieceSetup,
   createTeamPlayers,
+  evaluateInterception,
   isCleanTackleAngle,
   isInsidePenaltyArea,
   resetForKickoff,
@@ -375,3 +377,103 @@ test('ReplayRecorder captures and interpolates slow-motion goal clips', () => {
   assert.ok(midSample !== null);
   assert.ok(midSample.ballPos.x > 12 && midSample.ballPos.x < 38);
 });
+
+test('computeLeadPassVector clearly differentiates short, long, and lobbed passes', () => {
+  const home = createTeamPlayers(TEAMS[0], 'home', '4-3-3');
+  const passer = home[6];
+  const nearMate = home[7];
+  const farMate = home[9];
+
+  passer.position = { x: 0, y: 0, z: 0 };
+  passer.facingAngle = Math.PI / 2;
+  passer.velocity = { x: 0, y: 0, z: 0 };
+
+  nearMate.position = { x: 10, y: 0, z: 2 };
+  nearMate.velocity = { x: 4, y: 0, z: 0 };
+
+  farMate.position = { x: 26, y: 0, z: -4 };
+  farMate.velocity = { x: 6, y: 0, z: 0 };
+
+  const shortPass = computeLeadPassVector(passer, nearMate, false);
+  const longPass = computeLeadPassVector(passer, farMate, false);
+  const lobPass = computeLeadPassVector(passer, farMate, true);
+
+  assert.equal(shortPass.passKind, 'short');
+  assert.equal(longPass.passKind, 'long');
+  assert.equal(lobPass.passKind, 'lob');
+
+  assert.ok(longPass.speed > shortPass.speed, 'Long pass should have higher horizontal pace than short pass');
+  assert.ok(longPass.spreadFactor > shortPass.spreadFactor, 'Short pass should be tighter/more accurate than long pass');
+  assert.ok(lobPass.loft >= 5.8, `Lobbed pass must produce an aerial arc (got loft=${lobPass.loft})`);
+  assert.ok(shortPass.loft < 1.0, 'Short pass should stay low on the turf');
+});
+
+test('evaluateInterception requires real reach and orientation (no magnetic steals) and blocks hard/aerial strikes', () => {
+  const away = createTeamPlayers(TEAMS[1], 'away', '4-4-2');
+  const defender = away[2];
+  defender.position = { x: 10, y: 0, z: 0 };
+  defender.facingAngle = Math.PI / 2; // facing +X
+  defender.actionState = 'run';
+  defender.kickCooldown = 0;
+
+  // 1. Out of reach -> none
+  const farBall: BallState = {
+    position: { x: 11.4, y: BALL_RADIUS, z: 0 },
+    velocity: { x: -12, y: 0, z: 0 },
+    spin: { x: 0, y: 0, z: 0 },
+    ownerId: null,
+    lastTouchTeam: 'home',
+    lastTouchPlayerName: 'Test',
+    pickupLockTimer: 0,
+  };
+  assert.equal(evaluateInterception(defender, farBall), 'none');
+
+  // 2. Fast pass whizzing behind defender's back (> 0.56m behind) -> NO magnetic vacuum steal
+  const behindBall: BallState = {
+    position: { x: 9.25, y: BALL_RADIUS, z: 0 },
+    velocity: { x: 14, y: 0, z: 0 },
+    spin: { x: 0, y: 0, z: 0 },
+    ownerId: null,
+    lastTouchTeam: 'home',
+    lastTouchPlayerName: 'Test',
+    pickupLockTimer: 0,
+  };
+  assert.equal(evaluateInterception(defender, behindBall), 'none');
+
+  // 3. Moderate pass in front within physical foot reach -> clean intercept
+  const frontPass: BallState = {
+    position: { x: 10.65, y: BALL_RADIUS, z: 0.1 },
+    velocity: { x: -13, y: 0, z: 0 },
+    spin: { x: 0, y: 0, z: 0 },
+    ownerId: null,
+    lastTouchTeam: 'home',
+    lastTouchPlayerName: 'Test',
+    pickupLockTimer: 0,
+  };
+  assert.equal(evaluateInterception(defender, frontPass), 'intercept');
+
+  // 4. Hard strike (> 17.5 m/s) hitting defender -> physical block, not magnetic control
+  const hardShot: BallState = {
+    position: { x: 10.55, y: 0.8, z: 0 },
+    velocity: { x: -23, y: 1, z: 0 },
+    spin: { x: 0, y: 0, z: 0 },
+    ownerId: null,
+    lastTouchTeam: 'home',
+    lastTouchPlayerName: 'Test',
+    pickupLockTimer: 0,
+  };
+  assert.equal(evaluateInterception(defender, hardShot), 'block');
+
+  // 5. High aerial ball (1.5m) right on defender -> head/chest block
+  const aerialBall: BallState = {
+    position: { x: 10.4, y: 1.55, z: 0 },
+    velocity: { x: -11, y: -1, z: 0 },
+    spin: { x: 0, y: 0, z: 0 },
+    ownerId: null,
+    lastTouchTeam: 'home',
+    lastTouchPlayerName: 'Test',
+    pickupLockTimer: 0,
+  };
+  assert.equal(evaluateInterception(defender, aerialBall), 'block');
+});
+

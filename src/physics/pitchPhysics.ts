@@ -27,6 +27,19 @@ export interface ShotVelocityParams {
   loftSpeed: number;
 }
 
+export type ShotKind = 'quick' | 'controlled' | 'power' | 'moving' | 'pressured';
+
+export interface ContextualShotResult {
+  dirX: number;
+  dirZ: number;
+  horizontalSpeed: number;
+  loftSpeed: number;
+  sideSpin: number;
+  shotKind: ShotKind;
+  accuracyFactor: number; // 0..1 (higher = tighter dispersion)
+  pressureLevel: number; // 0..1
+}
+
 /**
  * Computes realistic shot speed & loft from player shotPower and 0..1 charge gauge.
  */
@@ -40,6 +53,344 @@ export function computeShotProfile(
   const horizontalSpeed = shotPower * powerFactor;
   const loftSpeed = 2.6 + clamped * 5.2;
   return { horizontalSpeed, loftSpeed };
+}
+
+/**
+ * Computes realistic contextual shot trajectory factoring in charge duration, body alignment,
+ * movement speed, distance to goal, and nearby defensive pressure.
+ * Accepts optional deterministic noise in [-1, 1] for unit testing.
+ */
+export function computeContextualShot(
+  shooter: PlayerState,
+  targetGoalX: number,
+  aimZ: number,
+  charge: number,
+  allPlayers: PlayerState[],
+  isSprinting: boolean,
+  noiseX?: number,
+  noiseY?: number,
+): ContextualShotResult {
+  const clampedCharge = Math.max(0, Math.min(1, charge));
+  const rawDirX = targetGoalX - shooter.position.x;
+  const rawDirZ = aimZ - shooter.position.z;
+  const distToGoal = Math.hypot(rawDirX, rawDirZ) || 1;
+  const goalNx = rawDirX / distToGoal;
+  const goalNz = rawDirZ / distToGoal;
+
+  // Body orientation alignment toward the target goal (-1 = back to goal, +1 = square to goal)
+  const facingX = Math.sin(shooter.facingAngle);
+  const facingZ = Math.cos(shooter.facingAngle);
+  const bodyAlign = facingX * goalNx + facingZ * goalNz;
+  const alignFactor = Math.max(0, Math.min(1, (bodyAlign + 0.25) / 1.25));
+
+  // Shooter movement speed penalty (controlled stationary/jogging shot > full sprint shot)
+  const speed = Math.hypot(shooter.velocity.x, shooter.velocity.z);
+  const speedRatio = Math.min(1, speed / 9.5);
+
+  // Measure nearby defensive pressure (opponents closing within 3.0m)
+  let pressureLevel = 0;
+  for (let i = 0; i < allPlayers.length; i++) {
+    const opp = allPlayers[i];
+    if (opp.team === shooter.team) continue;
+    const dx = opp.position.x - shooter.position.x;
+    const dz = opp.position.z - shooter.position.z;
+    const d = Math.hypot(dx, dz);
+    if (d < 3.0) {
+      // Defenders in front/side apply stronger pressure than one trailing behind
+      const frontDot = d > 0.01 ? (dx / d) * goalNx + (dz / d) * goalNz : 0.5;
+      const weight = frontDot > -0.25 ? 1.0 : 0.55;
+      const contrib = ((3.0 - d) / 3.0) * weight;
+      if (contrib > pressureLevel) pressureLevel = contrib;
+    }
+  }
+  pressureLevel = Math.min(1, pressureLevel);
+
+  // Classify shot type for clear feel differences
+  let shotKind: ShotKind = 'controlled';
+  if (pressureLevel >= 0.48) {
+    shotKind = 'pressured';
+  } else if (clampedCharge >= 0.72) {
+    shotKind = 'power';
+  } else if (clampedCharge <= 0.28) {
+    shotKind = 'quick';
+  } else if (isSprinting || speed > 6.2) {
+    shotKind = 'moving';
+  }
+
+  // Speed & loft profile by shot type and body balance
+  const baseProfile = computeShotProfile(shooter.attributes.shotPower, clampedCharge, isSprinting);
+  const bodyPowerMult = 0.8 + alignFactor * 0.22; // Awkward/back-to-goal strikes lose pace
+  let horizontalSpeed = baseProfile.horizontalSpeed * bodyPowerMult;
+  let loftSpeed = baseProfile.loftSpeed;
+
+  if (shotKind === 'quick') {
+    horizontalSpeed *= 0.94;
+    loftSpeed = Math.max(1.6, loftSpeed * 0.72);
+  } else if (shotKind === 'power') {
+    horizontalSpeed *= 1.06;
+    loftSpeed += 0.95;
+  } else if (shotKind === 'pressured') {
+    horizontalSpeed *= 0.96;
+    loftSpeed += pressureLevel * 1.15;
+  }
+
+  // Distance adds subtle natural elevation for long-range drives
+  if (distToGoal > 22) {
+    loftSpeed += Math.min(1.6, (distToGoal - 22) * 0.075);
+  }
+
+  // Accuracy factor (never 100% auto-aim laser)
+  const overchargePenalty = clampedCharge > 0.78 ? (clampedCharge - 0.78) * 1.35 : 0;
+  const distPenalty = Math.max(0, (distToGoal - 14) / 38) * 0.22;
+  const accuracyFactor = Math.max(
+    0.18,
+    Math.min(
+      0.95,
+      0.92 -
+        (1 - alignFactor) * 0.34 -
+        speedRatio * 0.16 -
+        pressureLevel * 0.28 -
+        overchargePenalty -
+        distPenalty,
+    ),
+  );
+
+  // Angular lateral dispersion (radians) and slight vertical variance
+  const maxAngleError = (1 - accuracyFactor) * 0.26; // up to ~12° on heavily pressured/off-balance shots
+  const rx = noiseX !== undefined ? Math.max(-1, Math.min(1, noiseX)) : (Math.random() - 0.5) * 2;
+  const ry = noiseY !== undefined ? Math.max(-1, Math.min(1, noiseY)) : (Math.random() - 0.5) * 2;
+  const angleOffset = rx * maxAngleError;
+  const cosA = Math.cos(angleOffset);
+  const sinA = Math.sin(angleOffset);
+  const finalDirX = goalNx * cosA - goalNz * sinA;
+  const finalDirZ = goalNx * sinA + goalNz * cosA;
+
+  loftSpeed = Math.max(1.4, loftSpeed + ry * (1 - accuracyFactor) * 1.6);
+
+  const sideSpin =
+    Math.abs(aimZ) > 0.35 ? Math.sign(aimZ) * (0.9 + alignFactor * 0.75) : 0;
+
+  return {
+    dirX: finalDirX,
+    dirZ: finalDirZ,
+    horizontalSpeed,
+    loftSpeed,
+    sideSpin,
+    shotKind,
+    accuracyFactor,
+    pressureLevel,
+  };
+}
+
+export interface LocomotionStepResult {
+  speed: number;
+  isTurningHard: boolean;
+}
+
+/**
+ * Advances a player's velocity and facing angle with realistic acceleration, deceleration,
+ * turning radius at sprint speed, and momentum inertia (prevents instant 180° snaps at full pace).
+ */
+export function stepPlayerLocomotion(
+  player: PlayerState,
+  desiredVx: number,
+  desiredVz: number,
+  desiredAngle: number | null,
+  dt: number,
+  isSprinting: boolean,
+  hasBall: boolean,
+): LocomotionStepResult {
+  const curVx = player.velocity.x;
+  const curVz = player.velocity.z;
+  const curSpeed = Math.hypot(curVx, curVz);
+  const desiredSpeed = Math.hypot(desiredVx, desiredVz);
+
+  let isTurningHard = false;
+  let effectiveAccel: number;
+
+  if (desiredSpeed < 0.15) {
+    // Natural turf deceleration when releasing movement input
+    effectiveAccel = 8.2 + (player.attributes.dribbling / 100) * 1.8;
+  } else {
+    // Alignment between current momentum and desired travel direction
+    let moveDot = 1;
+    if (curSpeed > 1.2) {
+      moveDot = (curVx * desiredVx + curVz * desiredVz) / (curSpeed * desiredSpeed);
+    }
+
+    const baseAccel = Math.max(7.5, player.attributes.acceleration * 0.58);
+    if (curSpeed > 4.2 && moveDot < 0.25) {
+      // High-speed cut or 180° reversal: plant feet & bleed momentum before re-accelerating
+      isTurningHard = true;
+      const agilityBonus = (player.attributes.dribbling / 100) * 1.6;
+      const brakeStrength = moveDot < -0.45 ? 0.46 : 0.62;
+      effectiveAccel = (baseAccel * brakeStrength + agilityBonus) * (hasBall ? 0.9 : 1.0);
+    } else if (desiredSpeed > curSpeed) {
+      effectiveAccel = baseAccel * (isSprinting ? 0.92 : 1.05);
+    } else {
+      effectiveAccel = baseAccel * 0.88;
+    }
+  }
+
+  const blend = Math.min(1, effectiveAccel * dt);
+  player.velocity.x = curVx + (desiredVx - curVx) * blend;
+  player.velocity.z = curVz + (desiredVz - curVz) * blend;
+
+  // Apply gentle turning speed bleed so sprinting around tight corners slows down realistically
+  if (isTurningHard && curSpeed > 5.0) {
+    const cornerDrag = Math.pow(0.965, dt * 60);
+    player.velocity.x *= cornerDrag;
+    player.velocity.z *= cornerDrag;
+  }
+
+  const newSpeed = Math.hypot(player.velocity.x, player.velocity.z);
+  if (desiredAngle !== null) {
+    // Turn rate slows down at full sprint speed (wider turning arc) and sharpens when jogging
+    const speedNorm = Math.min(1, newSpeed / 10.0);
+    const baseTurnRate = hasBall
+      ? 10.5 + (player.attributes.dribbling / 100) * 3.5
+      : 12.0;
+    const speedTurnScale = 1 - speedNorm * (isSprinting ? 0.46 : 0.3);
+    const turnRate = Math.max(5.2, baseTurnRate * speedTurnScale);
+
+    let diff = desiredAngle - player.facingAngle;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    player.facingAngle += diff * Math.min(1, turnRate * dt);
+  }
+
+  return { speed: newSpeed, isTurningHard };
+}
+
+export interface BallReceptionResult {
+  outcome: 'control' | 'heavy_touch';
+  touchOffsetMeters: number;
+  touchDirX: number;
+  touchDirZ: number;
+  deflectSpeed: number;
+}
+
+/**
+ * Evaluates a player's first touch when receiving/controlling a loose ball.
+ * Accounts for incoming ball speed, bounce height, player sprint speed, orientation, and dribbling skill.
+ */
+export function evaluateBallReception(
+  player: PlayerState,
+  ball: BallState,
+  inputDirX = 0,
+  inputDirZ = 0,
+): BallReceptionResult {
+  const ballSpeed = Math.hypot(ball.velocity.x, ball.velocity.z);
+  const playerSpeed = Math.hypot(player.velocity.x, player.velocity.z);
+  const isSprinting = player.actionState === 'sprint' || playerSpeed > 7.4;
+
+  // Preferred cushion direction: movement input > current velocity > facing direction
+  const inLen = Math.hypot(inputDirX, inputDirZ);
+  let touchDirX: number;
+  let touchDirZ: number;
+  if (inLen > 0.18) {
+    touchDirX = inputDirX / inLen;
+    touchDirZ = inputDirZ / inLen;
+  } else if (playerSpeed > 1.2) {
+    touchDirX = player.velocity.x / playerSpeed;
+    touchDirZ = player.velocity.z / playerSpeed;
+  } else {
+    touchDirX = Math.sin(player.facingAngle);
+    touchDirZ = Math.cos(player.facingAngle);
+  }
+
+  // Measure how cleanly the player faces/aligns with the incoming ball
+  const facingX = Math.sin(player.facingAngle);
+  const facingZ = Math.cos(player.facingAngle);
+  let incomingAlign = 0.5;
+  if (ballSpeed > 1.5) {
+    // Ideal trap is receiving from front (ball velocity opposite facing) or running smoothly along ball path
+    const ballNx = ball.velocity.x / ballSpeed;
+    const ballNz = ball.velocity.z / ballSpeed;
+    const facingBall = -(ballNx * facingX + ballNz * facingZ);
+    const runningWithBall = ballNx * touchDirX + ballNz * touchDirZ;
+    incomingAlign = Math.max(facingBall, runningWithBall * 0.9);
+  }
+
+  const skillFactor = Math.max(0.5, Math.min(1.1, player.attributes.dribbling / 85));
+  const heightDifficulty = Math.max(0, (ball.position.y - 0.55) * 0.45);
+  const speedDifficulty = Math.max(0, (ballSpeed - 9.5) / 14);
+  const sprintDifficulty = isSprinting ? 0.28 : playerSpeed > 4.5 ? 0.12 : 0;
+  const alignPenalty = incomingAlign < 0 ? Math.abs(incomingAlign) * 0.26 : 0;
+
+  const difficulty = (speedDifficulty + heightDifficulty + sprintDifficulty + alignPenalty) / skillFactor;
+
+  // Very hard, awkward incoming balls bounce off the first touch instead of sticking magically
+  if (ballSpeed > 19.5 && difficulty > 0.92 && ball.lastTouchTeam !== player.team) {
+    const deflectSpeed = Math.min(9.5, ballSpeed * 0.34);
+    return {
+      outcome: 'heavy_touch',
+      touchOffsetMeters: 0.95,
+      touchDirX,
+      touchDirZ,
+      deflectSpeed,
+    };
+  }
+
+  // Variable first-touch cushion distance: tight when slow, pushed slightly further on hard/sprint receptions
+  const baseTouch = isSprinting ? 0.92 : 0.68;
+  const touchOffsetMeters = Math.min(1.28, baseTouch + difficulty * 0.34);
+
+  return {
+    outcome: 'control',
+    touchOffsetMeters,
+    touchDirX,
+    touchDirZ,
+    deflectSpeed: 0,
+  };
+}
+
+/**
+ * Prevents free-moving balls from ghosting straight through outfield players' bodies.
+ * Returns the blocking player if a physical body deflection occurred, else null.
+ */
+export function resolveLooseBallBodyContact(
+  ball: BallState,
+  players: PlayerState[],
+): PlayerState | null {
+  if (ball.ownerId !== null || ball.position.y > 1.8) return null;
+
+  const minDist = PLAYER_RADIUS + BALL_RADIUS;
+  const minDistSq = minDist * minDist;
+
+  for (let i = 0; i < players.length; i++) {
+    const p = players[i];
+    if (p.role === 'GK') continue;
+    // Let the kicker's own just-struck ball clear their foot cleanly
+    if (p.kickCooldown > 0.16) continue;
+
+    const dx = ball.position.x - p.position.x;
+    const dz = ball.position.z - p.position.z;
+    const distSq = dx * dx + dz * dz;
+    if (distSq >= minDistSq || distSq < 1e-6) continue;
+
+    const dist = Math.sqrt(distSq);
+    const nx = dx / dist;
+    const nz = dz / dist;
+
+    // Push ball outside body radius so it never clips through torso/legs
+    ball.position.x = p.position.x + nx * (minDist + 0.03);
+    ball.position.z = p.position.z + nz * (minDist + 0.03);
+
+    const vn = ball.velocity.x * nx + ball.velocity.z * nz;
+    if (vn < -1.0) {
+      // Realistic damped deflection off shins/body
+      ball.velocity.x = (ball.velocity.x - 1.45 * vn * nx) * 0.52 + p.velocity.x * 0.25;
+      ball.velocity.z = (ball.velocity.z - 1.45 * vn * nz) * 0.52 + p.velocity.z * 0.25;
+      ball.velocity.y = Math.max(ball.velocity.y * 0.45, 0.85);
+      ball.lastTouchTeam = p.team;
+      ball.lastTouchPlayerName = p.name;
+      ball.pickupLockTimer = Math.max(ball.pickupLockTimer, 0.12);
+      return p;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -81,8 +432,8 @@ export function attemptGoalkeeperSave(
   const horizDist = Math.hypot(dx, dz);
 
   const isDiving = gk.actionState === 'dive';
-  const reachRadius = isDiving ? 1.55 : 1.05;
-  const maxReachHeight = isDiving ? 2.25 : 2.15;
+  const reachRadius = isDiving ? 1.58 : 1.05;
+  const maxReachHeight = isDiving ? 2.28 : 2.15;
 
   if (horizDist > reachRadius || ball.position.y > maxReachHeight) {
     return null;
@@ -91,18 +442,22 @@ export function attemptGoalkeeperSave(
   const ballSpeed = Math.hypot(ball.velocity.x, ball.velocity.z);
   const attackDir = gk.team === 'home' ? 1 : -1;
 
-  // Hard shots (> 18.5 m/s) parry wide away from goal; softer shots/crosses get caught cleanly
-  if (ballSpeed > 18.5 && ball.lastTouchTeam !== gk.team) {
+  // Hard shots (> 18.5 m/s) or outstretched full-stretch dives (> 14.5 m/s) parry wide away from danger
+  const isHardSave =
+    ball.lastTouchTeam !== gk.team &&
+    (ballSpeed > 18.5 || (isDiving && ballSpeed > 14.5 && horizDist > 0.9));
+
+  if (isHardSave) {
     const deflectZ =
       Math.abs(dz) > 0.12
-        ? Math.sign(dz) * 0.75
+        ? Math.sign(dz) * 0.82
         : gk.position.z >= 0
-          ? 0.7
-          : -0.7;
+          ? 0.78
+          : -0.78;
     ball.velocity.x = attackDir * (8.5 + Math.random() * 3.5);
-    ball.velocity.z = deflectZ * (9.5 + Math.random() * 3.5);
+    ball.velocity.z = deflectZ * (10.0 + Math.random() * 3.5);
     ball.velocity.y = 2.8;
-    ball.pickupLockTimer = 0.2;
+    ball.pickupLockTimer = 0.22;
     ball.lastTouchTeam = gk.team;
     ball.lastTouchPlayerName = gk.name;
     gk.kickCooldown = 0.35;

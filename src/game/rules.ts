@@ -210,63 +210,133 @@ export function evaluatePassLaneClearance(
   return Math.max(0, Math.min(1, (minPerpDist - 0.8) / 3.5));
 }
 
+export type PassKind = 'short' | 'long' | 'lob';
+
+export interface LeadPassVector {
+  dirX: number;
+  dirZ: number;
+  speed: number;
+  loft: number;
+  passKind: PassKind;
+  spreadFactor: number; // higher = slightly lower accuracy on long/off-balance passes
+}
+
 /**
- * Computes a lead-pass vector anticipating receiver movement, modulated by passer accuracy.
+ * Computes a lead-pass vector clearly differentiating:
+ * - Short ground pass (<= 15m): crisp, accurate, low pace & low loft
+ * - Long driven pass (> 15m): stronger power, longer lead, slightly higher trajectory & spread
+ * - Lobbed pass (isLob): true aerial arc designed to clear defenders
+ * Also accounts for passer orientation, speed, and distance.
  */
 export function computeLeadPassVector(
   passer: PlayerState,
   receiver: PlayerState,
   isLob: boolean,
-): { dirX: number; dirZ: number; speed: number; loft: number } {
+): LeadPassVector {
   const rawDx = receiver.position.x - passer.position.x;
   const rawDz = receiver.position.z - passer.position.z;
-  const rawDist = Math.hypot(rawDx, rawDz);
+  const rawDist = Math.hypot(rawDx, rawDz) || 1;
 
-  const estSpeed = isLob
-    ? Math.min(25, Math.max(15, rawDist * 0.92))
-    : Math.min(22, Math.max(11, rawDist * 0.98));
+  const passKind: PassKind = isLob ? 'lob' : rawDist <= 15 ? 'short' : 'long';
 
-  const travelTime = Math.min(1.1, rawDist / estSpeed);
-  const leadX = receiver.position.x + receiver.velocity.x * travelTime * 0.58;
-  const leadZ = receiver.position.z + receiver.velocity.z * travelTime * 0.58;
+  // Passer body alignment toward target (passing 180° behind reduces pace & precision)
+  const facingX = Math.sin(passer.facingAngle);
+  const facingZ = Math.cos(passer.facingAngle);
+  const alignDot = (rawDx / rawDist) * facingX + (rawDz / rawDist) * facingZ;
+  const alignFactor = Math.max(0.76, Math.min(1.04, 0.88 + alignDot * 0.16));
+
+  const passerSpeed = Math.hypot(passer.velocity.x, passer.velocity.z);
+  const speedPenalty = Math.min(1, passerSpeed / 10) * 0.032;
+
+  let estSpeed: number;
+  let loft: number;
+  let leadFactor: number;
+  let baseSpread: number;
+
+  if (passKind === 'lob') {
+    estSpeed = Math.min(24.5, Math.max(14.5, 11.5 + rawDist * 0.42)) * alignFactor;
+    // Calibrated aerial arc to clear defenders (> 2.3m apex on medium/long lobs)
+    loft = Math.min(9.4, Math.max(5.8, 5.2 + rawDist * 0.135));
+    leadFactor = 0.64;
+    baseSpread = 0.068;
+  } else if (passKind === 'short') {
+    estSpeed = Math.min(17.5, Math.max(11.5, 9.8 + rawDist * 0.52)) * alignFactor;
+    loft = 0.28 + Math.min(0.18, rawDist * 0.01);
+    leadFactor = 0.44;
+    baseSpread = 0.024;
+  } else {
+    estSpeed = Math.min(24.2, Math.max(17.8, 12.2 + rawDist * 0.36)) * alignFactor;
+    loft = 0.78 + Math.min(0.75, (rawDist - 15) * 0.032);
+    leadFactor = 0.62;
+    baseSpread = 0.052;
+  }
+
+  const travelTime = Math.min(1.15, rawDist / Math.max(8, estSpeed));
+  const leadX = receiver.position.x + receiver.velocity.x * travelTime * leadFactor;
+  const leadZ = receiver.position.z + receiver.velocity.z * travelTime * leadFactor;
+
+  const skillError = ((100 - passer.attributes.passing) / 100) * 0.055;
+  const offAxisError = alignDot < 0.15 ? (0.15 - alignDot) * 0.045 : 0;
+  const spreadFactor = baseSpread + skillError + speedPenalty + offAxisError;
 
   return {
     dirX: leadX - passer.position.x,
     dirZ: leadZ - passer.position.z,
     speed: estSpeed,
-    loft: isLob ? Math.min(8.5, 4.8 + rawDist * 0.1) : 0.55,
+    loft,
+    passKind,
+    spreadFactor,
   };
 }
 
 /**
- * Finds the best teammate to pass toward given an aim direction, factoring in lane clearance.
+ * Finds the best teammate to pass toward given joystick/aim direction, passer orientation,
+ * target distance, lane clearance, and teammate velocity.
  */
 export function findBestPassTarget(
   passer: PlayerState,
   players: PlayerState[],
   aimX: number,
   aimZ: number,
+  isLob = false,
 ): PlayerState | null {
   const aimLen = Math.hypot(aimX, aimZ);
-  const dirX = aimLen > 0.15 ? aimX / aimLen : Math.sin(passer.facingAngle);
-  const dirZ = aimLen > 0.15 ? aimZ / aimLen : Math.cos(passer.facingAngle);
+  const facingX = Math.sin(passer.facingAngle);
+  const facingZ = Math.cos(passer.facingAngle);
+
+  // Blend joystick input strongly with subtle facing continuity
+  let dirX = facingX;
+  let dirZ = facingZ;
+  if (aimLen > 0.15) {
+    const nx = aimX / aimLen;
+    const nz = aimZ / aimLen;
+    dirX = nx * 0.88 + facingX * 0.12;
+    dirZ = nz * 0.88 + facingZ * 0.12;
+    const dLen = Math.hypot(dirX, dirZ) || 1;
+    dirX /= dLen;
+    dirZ /= dLen;
+  }
 
   let best: PlayerState | null = null;
   let bestScore = -Infinity;
+  const idealDist = isLob ? 24 : 14;
+  const maxDist = isLob ? 54 : 46;
 
   for (const p of players) {
     if (p.team !== passer.team || p.id === passer.id) continue;
     const dx = p.position.x - passer.position.x;
     const dz = p.position.z - passer.position.z;
     const dist = Math.hypot(dx, dz);
-    if (dist < 2.2 || dist > 48) continue;
+    if (dist < (isLob ? 6.5 : 2.2) || dist > maxDist) continue;
 
     const dot = (dx / dist) * dirX + (dz / dist) * dirZ;
-    if (dot < 0.12) continue;
+    if (dot < 0.16) continue;
 
     const laneClear = evaluatePassLaneClearance(passer, p, players);
-    const distPenalty = Math.abs(dist - 16) * 0.015;
-    const score = dot * 2.1 + laneClear * 0.85 - distPenalty;
+    // Lobbed passes care less about ground-lane blockage since they travel overhead
+    const laneWeight = isLob ? 0.3 : 0.95;
+    const distPenalty = Math.abs(dist - idealDist) * 0.016;
+    const score = dot * 2.25 + laneClear * laneWeight - distPenalty;
     if (score > bestScore) {
       bestScore = score;
       best = p;
@@ -274,6 +344,62 @@ export function findBestPassTarget(
   }
 
   return best;
+}
+
+export type InterceptionOutcome = 'none' | 'intercept' | 'block';
+
+/**
+ * Evaluates whether a non-GK outfield defender can realistically intercept or block
+ * a free-moving opponent pass/shot based on real position, height, facing angle, and ball speed.
+ * Eliminates magnetic interceptions when a ball passes fast behind a defender or out of reach.
+ */
+export function evaluateInterception(
+  defender: PlayerState,
+  ball: BallState,
+): InterceptionOutcome {
+  if (ball.ownerId !== null || defender.role === 'GK' || defender.kickCooldown > 0) {
+    return 'none';
+  }
+  if (ball.lastTouchTeam === defender.team) return 'none';
+
+  const dx = ball.position.x - defender.position.x;
+  const dz = ball.position.z - defender.position.z;
+  const horizDist = Math.hypot(dx, dz);
+
+  const isTackling = defender.actionState === 'tackle';
+  const maxReach = isTackling ? 1.22 : 0.86;
+  if (horizDist > maxReach || ball.position.y > 1.92) {
+    return 'none';
+  }
+
+  const ballSpeed = Math.hypot(ball.velocity.x, ball.velocity.z);
+
+  // High aerial ball (1.35m..1.92m): chest/head block deflection, never magnetic foot control
+  if (ball.position.y > 1.35) {
+    return horizDist <= 0.72 ? 'block' : 'none';
+  }
+
+  // Slow/rolling loose ball within physical foot reach -> clean interception
+  if (ballSpeed < 10.5) {
+    return 'intercept';
+  }
+
+  // Fast pass/shot: must be reasonably oriented toward the ball or actively lunging
+  const facingX = Math.sin(defender.facingAngle);
+  const facingZ = Math.cos(defender.facingAngle);
+  const toBallDot = horizDist > 0.01 ? (dx / horizDist) * facingX + (dz / horizDist) * facingZ : 1;
+
+  if (!isTackling && toBallDot < -0.15 && horizDist > 0.56) {
+    // Ball whizzed behind defender's back -> cannot magically vacuum-intercept
+    return 'none';
+  }
+
+  // Very fast shot (> 17.5 m/s) hitting a defender -> physical block/deflection rather than instant glue
+  if (ballSpeed > 17.5) {
+    return horizDist <= (isTackling ? 1.05 : 0.74) ? 'block' : 'none';
+  }
+
+  return 'intercept';
 }
 
 export function getRestartPositionForOutOfBounds(

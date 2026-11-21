@@ -8,12 +8,15 @@ import {
   TacticalMentality,
   TeamSide,
 } from '../core/types';
-import { applyBallKick, predictBallCrossingX } from '../physics/pitchPhysics';
+import { applyBallKick, computeContextualShot, predictBallCrossingX } from '../physics/pitchPhysics';
 import {
   computeLeadPassVector,
   evaluatePassLaneClearance,
   findBestPassTarget,
+  isCleanTackleAngle,
 } from '../game/rules';
+
+export type TeamTransitionMode = 'none' | 'attack' | 'defend';
 
 export interface AiSteeringOutput {
   desiredX: number;
@@ -25,6 +28,7 @@ export interface AiSteeringOutput {
   shouldDive: boolean;
   diveDir: -1 | 0 | 1;
   passTarget: PlayerState | null;
+  preferLob?: boolean;
 }
 
 export interface TeamDefensiveAssignments {
@@ -45,7 +49,8 @@ export function computeDefensiveAssignments(
   let best1 = Infinity;
   let best2 = Infinity;
 
-  for (const p of players) {
+  for (let i = 0; i < players.length; i++) {
+    const p = players[i];
     if (p.team !== team || p.role === 'GK' || p.isControlled) continue;
     const d = Math.hypot(p.position.x - ball.position.x, p.position.z - ball.position.z);
     if (d < best1) {
@@ -74,11 +79,10 @@ export function findClosestPresserId(
 }
 
 /**
- * Computes tactical Stage 2/3 steering and decisions for AI-controlled players:
- * - Goalkeeper: angle cutting, shot prediction + diving saves, sweeper rush, distribution
- * - Offensive AI: forward runs in behind, width occupation, support triangles, lane-checked passes, corner-aimed shots
- * - Defensive AI: pressing + tackle attempts, goal-side cover shadow, zonal/man marking
- * - Tactical Mentality & Formation modifiers: shifts line depth, press urgency, and attack runs
+ * Computes tactical steering and decisions for AI-controlled players:
+ * - Goalkeeper: angle cutting, shot anticipation, disciplined sweeper rush, safe open-lane distribution
+ * - Offensive AI: passing triangles, forward runs into space, anti-clumping width, lane-checked short/long/lob passes
+ * - Defensive AI: pressing, goal-side cover shadow + passing-lane screening, attacker tracking, transition recovery
  */
 export function computeAiSteering(
   player: PlayerState,
@@ -88,6 +92,7 @@ export function computeAiSteering(
   closestPresserId: string | null,
   coverDefenderId: string | null = null,
   mentality: TacticalMentality = 'balanced',
+  transitionMode: TeamTransitionMode = 'none',
 ): AiSteeringOutput {
   const formation = FORMATIONS[formationId] ?? FORMATIONS['4-3-3'];
   const tactics = getFormationTactics(formationId, mentality);
@@ -107,16 +112,16 @@ export function computeAiSteering(
   const ownGoalX = -attackDir * HALF_LENGTH;
 
   // =========================================================================
-  // 1. GOALKEEPER AI (Angle cutting, Shot-anticipation dives, Sweeper, Clear)
+  // 1. GOALKEEPER AI (Angle cutting, Shot-anticipation dives, Sweeper, Distribution)
   // =========================================================================
   if (player.role === 'GK') {
-    const gkBaseX = -attackDir * (HALF_LENGTH - 1.6);
+    const gkBaseX = -attackDir * (HALF_LENGTH - 1.55);
 
     if (player.hasBall) {
       if (player.gkHoldTimer > 0) {
         return {
           desiredX: gkBaseX,
-          desiredZ: 0,
+          desiredZ: Math.max(-2.5, Math.min(2.5, player.position.z * 0.6)),
           sprint: false,
           shouldPass: false,
           shouldShoot: false,
@@ -126,8 +131,31 @@ export function computeAiSteering(
           passTarget: null,
         };
       }
-      const wideSide = player.position.z >= 0 ? -0.45 : 0.45;
-      const target = findBestPassTarget(player, allPlayers, attackDir, wideSide);
+
+      // Scan for the safest open teammate (prefer short open outlet; loft upfield if pressed)
+      let bestOutlet: PlayerState | null = null;
+      let bestOutletScore = -Infinity;
+      for (let i = 0; i < allPlayers.length; i++) {
+        const mate = allPlayers[i];
+        if (mate.team !== player.team || mate.id === player.id) continue;
+        const dx = (mate.position.x - player.position.x) * attackDir;
+        if (dx < 5 || dx > 48) continue;
+        const dist = Math.hypot(mate.position.x - player.position.x, mate.position.z - player.position.z);
+        const laneClear = evaluatePassLaneClearance(player, mate, allPlayers);
+        if (laneClear < 0.3) continue;
+        // Prefer wide fullbacks/midfielders with clear lanes
+        const wideBonus = Math.abs(mate.position.z) > 10 ? 0.55 : 0;
+        const score = laneClear * 2.4 + wideBonus - Math.abs(dist - 20) * 0.025;
+        if (score > bestOutletScore) {
+          bestOutletScore = score;
+          bestOutlet = mate;
+        }
+      }
+
+      const outletDist = bestOutlet
+        ? Math.hypot(bestOutlet.position.x - player.position.x, bestOutlet.position.z - player.position.z)
+        : 32;
+
       return {
         desiredX: gkBaseX,
         desiredZ: 0,
@@ -137,7 +165,8 @@ export function computeAiSteering(
         shouldTackle: false,
         shouldDive: false,
         diveDir: 0,
-        passTarget: target,
+        passTarget: bestOutlet,
+        preferLob: !bestOutlet || outletDist > 22,
       };
     }
 
@@ -145,16 +174,16 @@ export function computeAiSteering(
     const ballSpeed = Math.hypot(ball.velocity.x, ball.velocity.z);
     if (
       shotCross &&
-      shotCross.time < 0.72 &&
-      ballSpeed > 11 &&
-      Math.abs(shotCross.z) <= GOAL_HALF_WIDTH + 1.1 &&
-      shotCross.y <= 2.6
+      shotCross.time < 0.76 &&
+      ballSpeed > 10.5 &&
+      Math.abs(shotCross.z) <= GOAL_HALF_WIDTH + 1.15 &&
+      shotCross.y <= 2.65
     ) {
       const zDiff = shotCross.z - player.position.z;
       const shouldDive =
         player.diveCooldown <= 0 &&
-        Math.abs(zDiff) > 0.7 &&
-        shotCross.time < 0.42;
+        Math.abs(zDiff) > 0.65 &&
+        shotCross.time < 0.44;
 
       return {
         desiredX: gkBaseX,
@@ -169,28 +198,39 @@ export function computeAiSteering(
       };
     }
 
+    // Disciplined sweeper rush: only come out if loose ball is genuinely inside box and GK can reach it safely
     const distToBall = Math.hypot(ball.position.x - player.position.x, ball.position.z - player.position.z);
-    const ballInOwnBox = Math.abs(ball.position.x - ownGoalX) < 13.5 && Math.abs(ball.position.z) < 13;
-    if (ball.ownerId === null && ballInOwnBox && distToBall < 11) {
-      return {
-        desiredX: ball.position.x,
-        desiredZ: ball.position.z,
-        sprint: true,
-        shouldPass: false,
-        shouldShoot: false,
-        shouldTackle: false,
-        shouldDive: false,
-        diveDir: 0,
-        passTarget: null,
-      };
+    const ballInOwnBox = Math.abs(ball.position.x - ownGoalX) < 13.5 && Math.abs(ball.position.z) < 13.5;
+    if (ball.ownerId === null && ballInOwnBox && distToBall < 11 && ballSpeed < 12) {
+      let nearestOppToBall = Infinity;
+      for (let i = 0; i < allPlayers.length; i++) {
+        const opp = allPlayers[i];
+        if (opp.team === player.team) continue;
+        const d = Math.hypot(opp.position.x - ball.position.x, opp.position.z - ball.position.z);
+        if (d < nearestOppToBall) nearestOppToBall = d;
+      }
+      if (distToBall <= nearestOppToBall + 1.8) {
+        return {
+          desiredX: ball.position.x,
+          desiredZ: ball.position.z,
+          sprint: true,
+          shouldPass: false,
+          shouldShoot: false,
+          shouldTackle: false,
+          shouldDive: false,
+          diveDir: 0,
+          passTarget: null,
+        };
+      }
     }
 
+    // Angle-cutting positioning between ball and center of goal
     const distBallFromGoal = Math.hypot(ball.position.x - ownGoalX, ball.position.z);
-    const stepOut = Math.min(3.8, Math.max(1.2, 4.4 - distBallFromGoal * 0.055));
+    const stepOut = Math.min(4.2, Math.max(1.25, 4.7 - distBallFromGoal * 0.06));
     const idealX = ownGoalX + attackDir * stepOut;
     const idealZ = Math.max(
-      -GOAL_HALF_WIDTH * 0.82,
-      Math.min(GOAL_HALF_WIDTH * 0.82, ball.position.z * 0.38),
+      -GOAL_HALF_WIDTH * 0.84,
+      Math.min(GOAL_HALF_WIDTH * 0.84, ball.position.z * (distBallFromGoal < 18 ? 0.44 : 0.34)),
     );
 
     return {
@@ -207,12 +247,12 @@ export function computeAiSteering(
   }
 
   // =========================================================================
-  // 2. AI BALL CARRIER (Shoot corners, lane-checked pass, evasion dribble)
+  // 2. AI BALL CARRIER (Shoot corners, lane-checked short/long/lob pass, evasion dribble)
   // =========================================================================
   if (player.hasBall) {
     const distToOppGoal = Math.hypot(oppGoalX - player.position.x, 0 - player.position.z);
 
-    if (distToOppGoal < 26 && Math.abs(player.position.z) < 20) {
+    if (distToOppGoal < 25 && Math.abs(player.position.z) < 19) {
       return {
         desiredX: oppGoalX,
         desiredZ: 0,
@@ -228,7 +268,8 @@ export function computeAiSteering(
 
     let nearestOppDist = Infinity;
     let nearestOpp: PlayerState | null = null;
-    for (const other of allPlayers) {
+    for (let i = 0; i < allPlayers.length; i++) {
+      const other = allPlayers[i];
       if (other.team === player.team) continue;
       const d = Math.hypot(other.position.x - player.position.x, other.position.z - player.position.z);
       if (d < nearestOppDist) {
@@ -239,29 +280,44 @@ export function computeAiSteering(
 
     let bestTarget: PlayerState | null = null;
     let bestPassScore = -Infinity;
-    for (const mate of allPlayers) {
+    let bestTargetLaneClear = 1;
+    for (let i = 0; i < allPlayers.length; i++) {
+      const mate = allPlayers[i];
       if (mate.team !== player.team || mate.id === player.id || mate.role === 'GK') continue;
       const dx = mate.position.x - player.position.x;
       const dz = mate.position.z - player.position.z;
       const dist = Math.hypot(dx, dz);
-      if (dist < 4 || dist > 38) continue;
+      if (dist < 5 || dist > 40) continue;
 
       const forwardProgress = dx * attackDir;
       const laneClear = evaluatePassLaneClearance(player, mate, allPlayers);
-      if (laneClear < 0.25) continue;
+      // Allow aerial lob over a blocked ground lane if runner is well ahead
+      const canLobOver = dist > 16 && forwardProgress > 8 && laneClear >= 0.08;
+      if (laneClear < 0.28 && !canLobOver) continue;
 
-      const score = forwardProgress * 0.14 + laneClear * 2.0 - Math.abs(dist - 16) * 0.03;
+      const counterBonus = transitionMode === 'attack' && forwardProgress > 8 ? 0.85 : 0;
+      const score =
+        forwardProgress * 0.14 +
+        laneClear * 2.1 +
+        counterBonus -
+        Math.abs(dist - 15) * 0.028;
       if (score > bestPassScore) {
         bestPassScore = score;
         bestTarget = mate;
+        bestTargetLaneClear = laneClear;
       }
     }
 
     if (
       bestTarget &&
-      (nearestOppDist < 5.2 ||
-        ((bestTarget.position.x - player.position.x) * attackDir > 8 && bestPassScore > 2.2))
+      (nearestOppDist < 5.0 ||
+        ((bestTarget.position.x - player.position.x) * attackDir > 7.5 && bestPassScore > 2.15))
     ) {
+      const targetDist = Math.hypot(
+        bestTarget.position.x - player.position.x,
+        bestTarget.position.z - player.position.z,
+      );
+      const preferLob = targetDist > 23 || (targetDist > 16 && bestTargetLaneClear < 0.38);
       return {
         desiredX: bestTarget.position.x,
         desiredZ: bestTarget.position.z,
@@ -272,20 +328,22 @@ export function computeAiSteering(
         shouldDive: false,
         diveDir: 0,
         passTarget: bestTarget,
+        preferLob,
       };
     }
 
-    let targetZ = player.position.z * 0.72;
+    // Dribble away from closing defender toward open attacking lane
+    let targetZ = player.position.z * 0.74;
     if (nearestOpp && nearestOppDist < 7.5) {
       const awayZ = player.position.z - nearestOpp.position.z;
-      targetZ = player.position.z + (awayZ >= 0 ? 4.5 : -4.5);
+      targetZ = player.position.z + (awayZ >= 0 ? 4.8 : -4.8);
       targetZ = Math.max(-HALF_WIDTH + 3, Math.min(HALF_WIDTH - 3, targetZ));
     }
 
     return {
       desiredX: oppGoalX,
       desiredZ: targetZ,
-      sprint: distToOppGoal > 16 && nearestOppDist > 4.2,
+      sprint: distToOppGoal > 15 && nearestOppDist > 4.0,
       shouldPass: false,
       shouldShoot: false,
       shouldTackle: false,
@@ -296,9 +354,17 @@ export function computeAiSteering(
   }
 
   // =========================================================================
-  // 3. OFF-BALL AI (Offensive Runs & Support vs Defensive Press/Cover/Mark)
+  // 3. OFF-BALL AI (Offensive Runs & Passing Support vs Defensive Press/Cover/Lane Screening)
   // =========================================================================
-  const owner = ball.ownerId ? allPlayers.find((p) => p.id === ball.ownerId) : null;
+  let owner: PlayerState | null = null;
+  if (ball.ownerId) {
+    for (let i = 0; i < allPlayers.length; i++) {
+      if (allPlayers[i].id === ball.ownerId) {
+        owner = allPlayers[i];
+        break;
+      }
+    }
+  }
   const teamHasBall = owner?.team === player.team;
 
   if (teamHasBall && owner) {
@@ -308,24 +374,44 @@ export function computeAiSteering(
       player.role === 'RW' ||
       player.role === 'CAM';
 
+    const distToOwner = Math.hypot(
+      owner.position.x - player.position.x,
+      owner.position.z - player.position.z,
+    );
+
     if (isAttacker) {
-      const pushDist = 14 + tactics.attackPushMeters;
-      const runDepth = Math.min(
+      const counterPush = transitionMode === 'attack' ? 5.5 : 0;
+      const pushDist = 13.5 + tactics.attackPushMeters + counterPush;
+      let runDepth = Math.min(
         HALF_LENGTH - 5.5,
         Math.max(anchor.x, ball.position.x + attackDir * pushDist),
       );
-      const runWidth =
-        player.role === 'LW'
-          ? -HALF_WIDTH * 0.58 * tactics.widthScale * attackDir
-          : player.role === 'RW'
-            ? HALF_WIDTH * 0.58 * tactics.widthScale * attackDir
-            : anchor.z;
+      if (attackDir < 0) {
+        runDepth = Math.max(
+          -HALF_LENGTH + 5.5,
+          Math.min(anchor.x, ball.position.x + attackDir * pushDist),
+        );
+      }
+
+      let runWidth: number;
+      if (player.role === 'LW') {
+        runWidth = -HALF_WIDTH * 0.62 * tactics.widthScale * attackDir;
+      } else if (player.role === 'RW') {
+        runWidth = HALF_WIDTH * 0.62 * tactics.widthScale * attackDir;
+      } else if (player.role === 'ST') {
+        // Striker probes the open central channel away from ball side for diagonal through-balls
+        const channelBias = owner.position.z >= 0 ? -4.5 : 4.5;
+        runWidth = Math.max(-11, Math.min(11, anchor.z * 0.45 + channelBias));
+      } else {
+        // CAM drifts into the half-space pocket between lines to offer a forward pass option
+        runWidth = Math.max(-15, Math.min(15, owner.position.z * 0.5 + (owner.position.z >= 0 ? -7.5 : 7.5)));
+      }
 
       const clampedX = Math.max(-HALF_LENGTH + 5, Math.min(HALF_LENGTH - 5, runDepth));
       return {
         desiredX: clampedX,
         desiredZ: Math.max(-HALF_WIDTH + 2.5, Math.min(HALF_WIDTH - 2.5, runWidth)),
-        sprint: Math.abs(clampedX - player.position.x) > 5,
+        sprint: transitionMode === 'attack' || Math.abs(clampedX - player.position.x) > 5.5,
         shouldPass: false,
         shouldShoot: false,
         shouldTackle: false,
@@ -335,21 +421,32 @@ export function computeAiSteering(
       };
     }
 
-    const distToOwner = Math.hypot(owner.position.x - player.position.x, owner.position.z - player.position.z);
-    if ((player.role === 'CM' || player.role === 'CDM') && distToOwner < 26) {
+    // Midfielders create clean passing triangles (~9-13m away, avoiding clumping onto the carrier)
+    if ((player.role === 'CM' || player.role === 'CDM') && distToOwner < 28) {
+      const forwardOffset = player.role === 'CM' ? 6.5 : -6.0;
       const supportX = Math.max(
         -HALF_LENGTH + 6,
         Math.min(
           HALF_LENGTH - 6,
-          owner.position.x + attackDir * ((player.role === 'CM' ? 4 : -6) + tactics.attackPushMeters * 0.4),
+          owner.position.x + attackDir * (forwardOffset + tactics.attackPushMeters * 0.45),
         ),
       );
-      const laneOffset = player.position.z >= owner.position.z ? 9.5 : -9.5;
-      const supportZ = Math.max(-HALF_WIDTH + 3, Math.min(HALF_WIDTH - 3, owner.position.z + laneOffset));
+      const preferredSign =
+        Math.abs(player.position.z - owner.position.z) > 1.5
+          ? player.position.z >= owner.position.z
+            ? 1
+            : -1
+          : owner.position.z >= 0
+            ? -1
+            : 1;
+      const supportZ = Math.max(
+        -HALF_WIDTH + 3.5,
+        Math.min(HALF_WIDTH - 3.5, owner.position.z + preferredSign * 10.5),
+      );
       return {
         desiredX: supportX,
         desiredZ: supportZ,
-        sprint: false,
+        sprint: Math.hypot(supportX - player.position.x, supportZ - player.position.z) > 8,
         shouldPass: false,
         shouldShoot: false,
         shouldTackle: false,
@@ -359,12 +456,21 @@ export function computeAiSteering(
       };
     }
 
+    // Fullbacks & CBs maintain collective structure and keep safe spacing from carrier
+    let supportX = Math.max(
+      -HALF_LENGTH + 4.5,
+      Math.min(HALF_LENGTH - 4.5, anchor.x + attackDir * (6.0 + tactics.attackPushMeters * 0.5)),
+    );
+    let supportZ = anchor.z;
+    if (distToOwner < 7.0) {
+      // Anti-clumping: step slightly wide/back to provide a clean outlet instead of crowding carrier
+      supportX -= attackDir * 3.5;
+      supportZ += player.position.z >= owner.position.z ? 4.0 : -4.0;
+    }
+
     return {
-      desiredX: Math.max(
-        -HALF_LENGTH + 4,
-        Math.min(HALF_LENGTH - 4, anchor.x + attackDir * (6.5 + tactics.attackPushMeters * 0.5)),
-      ),
-      desiredZ: anchor.z,
+      desiredX: Math.max(-HALF_LENGTH + 4, Math.min(HALF_LENGTH - 4, supportX)),
+      desiredZ: Math.max(-HALF_WIDTH + 3, Math.min(HALF_WIDTH - 3, supportZ)),
       sprint: false,
       shouldPass: false,
       shouldShoot: false,
@@ -375,22 +481,29 @@ export function computeAiSteering(
     };
   }
 
+  // =========================================================================
+  // 4. DEFENSIVE AI (Pressing, Goal-Side Cover + Pass-Lane Screening, Recovery)
+  // =========================================================================
   if (player.id === closestPresserId) {
     const targetX = ball.position.x + ball.velocity.x * 0.16;
     const targetZ = ball.position.z + ball.velocity.z * 0.16;
     const distToBall = Math.hypot(ball.position.x - player.position.x, ball.position.z - player.position.z);
-    const tackleTriggerRange = TACKLE_REACH * (0.94 + tactics.pressIntensity * 0.1);
+    const tackleTriggerRange = TACKLE_REACH * (0.92 + tactics.pressIntensity * 0.09);
 
     const canAttemptTackle =
       owner != null &&
       owner.team !== player.team &&
       distToBall < tackleTriggerRange &&
-      player.tackleCooldown <= 0;
+      player.tackleCooldown <= 0 &&
+      isCleanTackleAngle(player, owner, ball);
 
     return {
       desiredX: Math.max(-HALF_LENGTH + 2, Math.min(HALF_LENGTH - 2, targetX)),
       desiredZ: Math.max(-HALF_WIDTH + 2, Math.min(HALF_WIDTH - 2, targetZ)),
-      sprint: tactics.pressIntensity >= 0.85 || distToBall < 14,
+      sprint:
+        transitionMode === 'defend' ||
+        tactics.pressIntensity >= 0.85 ||
+        distToBall < 14,
       shouldPass: false,
       shouldShoot: false,
       shouldTackle: canAttemptTackle,
@@ -400,18 +513,45 @@ export function computeAiSteering(
     };
   }
 
+  // Cover defender: goal-side cover + actively screens the most dangerous forward passing lane
   if (coverDefenderId && player.id === coverDefenderId) {
     const toGoalX = ownGoalX - ball.position.x;
     const toGoalZ = 0 - ball.position.z;
     const toGoalLen = Math.hypot(toGoalX, toGoalZ) || 1;
-    const coverDist = tactics.pressIntensity > 1.1 ? 5.2 : 6.6;
-    const coverX = ball.position.x + (toGoalX / toGoalLen) * coverDist;
-    const coverZ = ball.position.z + (toGoalZ / toGoalLen) * coverDist;
+    const coverDist = tactics.pressIntensity > 1.1 ? 5.0 : 6.4;
+    let coverX = ball.position.x + (toGoalX / toGoalLen) * coverDist;
+    let coverZ = ball.position.z + (toGoalZ / toGoalLen) * coverDist;
+
+    // Look for an opponent forward runner to screen the passing lane toward them
+    if (owner && owner.team !== player.team) {
+      let bestRunner: PlayerState | null = null;
+      let bestThreat = -Infinity;
+      for (let i = 0; i < allPlayers.length; i++) {
+        const opp = allPlayers[i];
+        if (opp.team === player.team || opp.id === owner.id || opp.role === 'GK') continue;
+        const dFromBall = Math.hypot(opp.position.x - ball.position.x, opp.position.z - ball.position.z);
+        if (dFromBall < 6 || dFromBall > 26) continue;
+        // Closer to our own goal = more dangerous
+        const goalThreat = -Math.abs(opp.position.x - ownGoalX);
+        if (goalThreat > bestThreat) {
+          bestThreat = goalThreat;
+          bestRunner = opp;
+        }
+      }
+      if (bestRunner) {
+        const screenX = ball.position.x * 0.55 + bestRunner.position.x * 0.45;
+        const screenZ = ball.position.z * 0.55 + bestRunner.position.z * 0.45;
+        coverX = coverX * 0.55 + screenX * 0.45;
+        coverZ = coverZ * 0.55 + screenZ * 0.45;
+      }
+    }
 
     return {
       desiredX: Math.max(-HALF_LENGTH + 4, Math.min(HALF_LENGTH - 4, coverX)),
       desiredZ: Math.max(-HALF_WIDTH + 3, Math.min(HALF_WIDTH - 3, coverZ)),
-      sprint: Math.hypot(coverX - player.position.x, coverZ - player.position.z) > 6,
+      sprint:
+        transitionMode === 'defend' ||
+        Math.hypot(coverX - player.position.x, coverZ - player.position.z) > 5.5,
       shouldPass: false,
       shouldShoot: false,
       shouldTackle: false,
@@ -429,8 +569,9 @@ export function computeAiSteering(
 
   if (isDefender) {
     let markTarget: PlayerState | null = null;
-    let bestMarkDist = 14.5;
-    for (const opp of allPlayers) {
+    let bestMarkDist = 15.5;
+    for (let i = 0; i < allPlayers.length; i++) {
+      const opp = allPlayers[i];
       if (opp.team === player.team || opp.role === 'GK') continue;
       const d = Math.hypot(opp.position.x - anchor.x, opp.position.z - anchor.z);
       if (d < bestMarkDist) {
@@ -440,12 +581,17 @@ export function computeAiSteering(
     }
 
     if (markTarget) {
-      const markX = markTarget.position.x - attackDir * 2.1;
-      const markZ = markTarget.position.z * 0.92;
+      // Stay goal-side of dangerous runner, anticipating their velocity slightly
+      const predX = markTarget.position.x + markTarget.velocity.x * 0.25;
+      const predZ = markTarget.position.z + markTarget.velocity.z * 0.25;
+      const markX = predX - attackDir * 2.0;
+      const markZ = predZ * 0.9;
       return {
         desiredX: Math.max(-HALF_LENGTH + 3.5, Math.min(HALF_LENGTH - 3.5, markX)),
         desiredZ: Math.max(-HALF_WIDTH + 2.5, Math.min(HALF_WIDTH - 2.5, markZ)),
-        sprint: Math.hypot(markX - player.position.x, markZ - player.position.z) > 5,
+        sprint:
+          transitionMode === 'defend' ||
+          Math.hypot(markX - player.position.x, markZ - player.position.z) > 4.8,
         shouldPass: false,
         shouldShoot: false,
         shouldTackle: false,
@@ -456,10 +602,14 @@ export function computeAiSteering(
     }
   }
 
+  // Midfielders & attackers recover promptly into defensive block when possession is lost
+  const recoveryShift = transitionMode === 'defend' ? -attackDir * 5.0 : 0;
+  const recoverX = Math.max(-HALF_LENGTH + 4, Math.min(HALF_LENGTH - 4, anchor.x + recoveryShift));
+
   return {
-    desiredX: anchor.x,
+    desiredX: recoverX,
     desiredZ: anchor.z,
-    sprint: false,
+    sprint: transitionMode === 'defend' && Math.hypot(recoverX - player.position.x, anchor.z - player.position.z) > 6,
     shouldPass: false,
     shouldShoot: false,
     shouldTackle: false,
@@ -482,11 +632,24 @@ export function executeAiBallAction(
     const oppGk = allPlayers.find((p) => p.team !== player.team && p.role === 'GK');
     const gkZ = oppGk?.position.z ?? 0;
     const cornerSign = gkZ >= 0 ? -1 : 1;
-    const targetZ = cornerSign * (GOAL_HALF_WIDTH * 0.65) + (Math.random() - 0.5) * 0.9;
-    const dirX = attackDir * HALF_LENGTH - player.position.x;
-    const dirZ = targetZ - player.position.z;
-    const sideSpin = cornerSign * 1.4;
-    applyBallKick(ball, dirX, dirZ, player.attributes.shotPower * 0.96, 4.1, player, sideSpin);
+    const targetZ = cornerSign * (GOAL_HALF_WIDTH * 0.65);
+    const shot = computeContextualShot(
+      player,
+      attackDir * HALF_LENGTH,
+      targetZ,
+      0.58,
+      allPlayers,
+      player.actionState === 'sprint',
+    );
+    applyBallKick(
+      ball,
+      shot.dirX,
+      shot.dirZ,
+      shot.horizontalSpeed,
+      shot.loftSpeed,
+      player,
+      shot.sideSpin,
+    );
     onSound?.('kick');
     return;
   }
@@ -496,11 +659,10 @@ export function executeAiBallAction(
       steering.passTarget.position.x - player.position.x,
       steering.passTarget.position.z - player.position.z,
     );
-    const isLob = dist > 23;
+    const isLob = steering.preferLob ?? dist > 23;
     const lead = computeLeadPassVector(player, steering.passTarget, isLob);
-    const inaccuracy = ((100 - player.attributes.passing) / 100) * 0.08;
-    const spreadX = (Math.random() - 0.5) * inaccuracy * dist;
-    const spreadZ = (Math.random() - 0.5) * inaccuracy * dist;
+    const spreadX = (Math.random() - 0.5) * lead.spreadFactor * dist;
+    const spreadZ = (Math.random() - 0.5) * lead.spreadFactor * dist;
 
     applyBallKick(
       ball,
@@ -510,9 +672,9 @@ export function executeAiBallAction(
       lead.loft,
       player,
     );
-    onSound?.('pass');
+    onSound?.(isLob ? 'kick' : 'pass');
   } else if (steering.shouldPass && player.role === 'GK') {
-    applyBallKick(ball, attackDir, (Math.random() - 0.5) * 0.5, 22, 6.4, player);
+    applyBallKick(ball, attackDir, (Math.random() - 0.5) * 0.45, 22, 6.4, player);
     onSound?.('kick');
   }
 }

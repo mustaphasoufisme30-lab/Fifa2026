@@ -187,6 +187,7 @@ export interface TeamConfig {
   name: string;
   shortName: string;
   city: string;
+  region?: 'europe' | 'africa';
   kit: TeamKit;
   rating: {
     attack: number;

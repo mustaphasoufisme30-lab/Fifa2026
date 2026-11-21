@@ -46,6 +46,7 @@ import {
   createTeamPlayers,
   findBestPassTarget,
   getRestartPositionForOutOfBounds,
+  isCleanTackleAngle,
   resetForKickoff,
   selectSwitchTarget,
 } from './rules';
@@ -877,6 +878,12 @@ export class MatchEngine {
     }
 
     const taker = sp.takerId ? this.players.find((p) => p.id === sp.takerId) ?? null : null;
+    if (!taker) {
+      this.phase = 'live';
+      this.setPiece = null;
+      this.emitHudSnapshot();
+      return;
+    }
     const isHumanTaker =
       sp.team === 'home' || (sp.team === 'away' && this.awayHumanControl && Boolean(awayInput));
     const takerInput = sp.team === 'home' ? homeInput : awayInput ?? homeInput;
@@ -1213,19 +1220,29 @@ export class MatchEngine {
       p.actionState !== 'tackle' &&
       p.actionState !== 'dive'
     ) {
-      const dx = this.ball.position.x - p.position.x;
-      const dz = this.ball.position.z - p.position.z;
-      const len = Math.hypot(dx, dz) || 1;
-      const nx = dx / len;
-      const nz = dz / len;
-      p.facingAngle = Math.atan2(nx, nz);
-      p.velocity.x = nx * 10.6;
-      p.velocity.z = nz * 10.6;
-      p.actionState = 'tackle';
-      p.actionTimer = 0.34;
-      p.tackleCooldown = 1.05;
-      this.attemptTackleSteal(p);
-      if (this.phase === 'setpiece') return;
+      const ballOwner =
+        this.ball.ownerId !== null
+          ? this.players.find((pl) => pl.id === this.ball.ownerId) ?? null
+          : null;
+      const canTackleCleanly =
+        !ballOwner ||
+        (ballOwner.team !== p.team && isCleanTackleAngle(p, ballOwner, this.ball));
+
+      if (canTackleCleanly) {
+        const dx = this.ball.position.x - p.position.x;
+        const dz = this.ball.position.z - p.position.z;
+        const len = Math.hypot(dx, dz) || 1;
+        const nx = dx / len;
+        const nz = dz / len;
+        p.facingAngle = Math.atan2(nx, nz);
+        p.velocity.x = nx * 10.6;
+        p.velocity.z = nz * 10.6;
+        p.actionState = 'tackle';
+        p.actionTimer = 0.34;
+        p.tackleCooldown = 1.05;
+        this.attemptTackleSteal(p);
+        if (this.phase === 'setpiece') return;
+      }
     }
 
     if (p.actionState === 'dive') {
@@ -1290,6 +1307,8 @@ export class MatchEngine {
   }
 
   private attemptTackleSteal(tackler: PlayerState): void {
+    if (this.phase !== 'live' || tackler.actionState !== 'tackle') return;
+
     if (this.ball.ownerId === null) {
       const d = Math.hypot(
         this.ball.position.x - tackler.position.x,
@@ -1308,6 +1327,8 @@ export class MatchEngine {
     if (outcome === 'free_kick' || outcome === 'penalty') {
       if (tackler.team === 'home') this.stats.homeFouls += 1;
       else this.stats.awayFouls += 1;
+      tackler.actionState = 'idle';
+      tackler.actionTimer = 0;
       tackler.tackleCooldown = 1.6;
       this.triggerSetPiece(outcome, owner.team, { ...owner.position });
       return;

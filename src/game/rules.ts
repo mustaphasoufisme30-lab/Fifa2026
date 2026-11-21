@@ -352,9 +352,46 @@ export function isInsidePenaltyArea(
 export type TackleOutcome = 'none' | 'clean' | 'free_kick' | 'penalty';
 
 /**
- * Evaluates a slide-tackle challenge against an opponent ball carrier:
- * - Clean steal if tackler reaches ball closer/sooner than carrier body
- * - Foul ('penalty' inside defending box, 'free_kick' outside) if heavy late collision without winning ball
+ * Determines whether an AI defender has a clean, disciplined angle to attempt a slide tackle
+ * without lunging recklessly straight through the back of a dribbling ball carrier.
+ */
+export function isCleanTackleAngle(
+  tackler: PlayerState,
+  victim: PlayerState,
+  ball: BallState,
+): boolean {
+  const distToBall = Math.hypot(
+    ball.position.x - tackler.position.x,
+    ball.position.z - tackler.position.z,
+  );
+  if (distToBall > TACKLE_REACH) return false;
+
+  const dxToVictim = victim.position.x - tackler.position.x;
+  const dzToVictim = victim.position.z - tackler.position.z;
+  const distToVictim = Math.hypot(dxToVictim, dzToVictim);
+
+  // Do not initiate an AI slide tackle from behind when the carrier's body blocks access to the ball
+  if (distToVictim > 0.001) {
+    const victimFwdX = Math.sin(victim.facingAngle);
+    const victimFwdZ = Math.cos(victim.facingAngle);
+    const fromVictimX = -dxToVictim / distToVictim;
+    const fromVictimZ = -dzToVictim / distToVictim;
+    const behindDot = fromVictimX * victimFwdX + fromVictimZ * victimFwdZ;
+
+    if (behindDot < -0.2 && distToBall > distToVictim * 1.15) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Evaluates an active slide-tackle challenge against an opponent ball carrier:
+ * - Returns 'none' if tackler is not executing an active tackle or is out of reach
+ * - Clean steal if tackler genuinely reaches the ball
+ * - Foul ('penalty' inside defending box, 'free_kick' outside) ONLY on a forceful collision
+ *   from behind the ball carrier that clearly misses the ball
  */
 export function classifyTackleFoul(
   tackler: PlayerState,
@@ -362,26 +399,53 @@ export function classifyTackleFoul(
   ball: BallState,
 ): TackleOutcome {
   if (!victim.hasBall || victim.team === tackler.team) return 'none';
+  if (tackler.actionState !== 'tackle') return 'none';
 
-  const distToVictim = Math.hypot(
-    victim.position.x - tackler.position.x,
-    victim.position.z - tackler.position.z,
-  );
-  if (distToVictim > TACKLE_REACH) return 'none';
-
+  const dxToVictim = victim.position.x - tackler.position.x;
+  const dzToVictim = victim.position.z - tackler.position.z;
+  const distToVictim = Math.hypot(dxToVictim, dzToVictim);
   const distToBall = Math.hypot(
     ball.position.x - tackler.position.x,
     ball.position.z - tackler.position.z,
   );
 
-  // Heavy late body contact from behind/side without reaching the ball cleanly
-  if (distToVictim < 0.98 && distToBall > distToVictim * 1.15) {
-    return isInsidePenaltyArea(victim.position.x, victim.position.z, tackler.team)
-      ? 'penalty'
-      : 'free_kick';
+  if (distToVictim > TACKLE_REACH && distToBall > TACKLE_REACH) return 'none';
+
+  // Clean ball-first dispossession when tackler reaches the ball cleanly
+  if (distToBall <= 1.05 && distToBall <= distToVictim + 0.25) {
+    return 'clean';
   }
 
-  return 'clean';
+  // Genuine foul requires ALL of:
+  // 1. Direct body impact (<= 0.78m, tighter than 2 * PLAYER_RADIUS = 0.90m)
+  // 2. Clearly missed the ball (> 1.15m away and much farther than the carrier's body)
+  // 3. Reckless approach from behind the ball carrier (behindDot < -0.35)
+  // 4. Forceful lunge closing speed into the carrier (>= 4.5 m/s)
+  if (distToVictim <= 0.78 && distToBall > 1.15 && distToBall > distToVictim * 1.45) {
+    const victimFwdX = Math.sin(victim.facingAngle);
+    const victimFwdZ = Math.cos(victim.facingAngle);
+    const invDist = distToVictim > 0.001 ? 1 / distToVictim : 1;
+    const fromVictimX = -dxToVictim * invDist;
+    const fromVictimZ = -dzToVictim * invDist;
+    const behindDot = fromVictimX * victimFwdX + fromVictimZ * victimFwdZ;
+
+    const toVictimX = dxToVictim * invDist;
+    const toVictimZ = dzToVictim * invDist;
+    const closingSpeed = tackler.velocity.x * toVictimX + tackler.velocity.z * toVictimZ;
+
+    if (behindDot < -0.35 && closingSpeed >= 4.5) {
+      return isInsidePenaltyArea(victim.position.x, victim.position.z, tackler.team)
+        ? 'penalty'
+        : 'free_kick';
+    }
+  }
+
+  // Clean steal only if the tackler actually reaches the ball within tackle reach
+  if (distToBall <= TACKLE_REACH * 0.88) {
+    return 'clean';
+  }
+
+  return 'none';
 }
 
 /**

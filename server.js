@@ -648,21 +648,59 @@ function isInsidePenaltyArea(x, z, defendingTeam) {
   }
   return x <= HALF_LENGTH + 0.5 && x >= HALF_LENGTH - PENALTY_AREA_LENGTH;
 }
-function classifyTackleFoul(tackler, victim, ball) {
-  if (!victim.hasBall || victim.team === tackler.team) return "none";
-  const distToVictim = Math.hypot(
-    victim.position.x - tackler.position.x,
-    victim.position.z - tackler.position.z
-  );
-  if (distToVictim > TACKLE_REACH) return "none";
+function isCleanTackleAngle(tackler, victim, ball) {
   const distToBall = Math.hypot(
     ball.position.x - tackler.position.x,
     ball.position.z - tackler.position.z
   );
-  if (distToVictim < 0.98 && distToBall > distToVictim * 1.15) {
-    return isInsidePenaltyArea(victim.position.x, victim.position.z, tackler.team) ? "penalty" : "free_kick";
+  if (distToBall > TACKLE_REACH) return false;
+  const dxToVictim = victim.position.x - tackler.position.x;
+  const dzToVictim = victim.position.z - tackler.position.z;
+  const distToVictim = Math.hypot(dxToVictim, dzToVictim);
+  if (distToVictim > 1e-3) {
+    const victimFwdX = Math.sin(victim.facingAngle);
+    const victimFwdZ = Math.cos(victim.facingAngle);
+    const fromVictimX = -dxToVictim / distToVictim;
+    const fromVictimZ = -dzToVictim / distToVictim;
+    const behindDot = fromVictimX * victimFwdX + fromVictimZ * victimFwdZ;
+    if (behindDot < -0.2 && distToBall > distToVictim * 1.15) {
+      return false;
+    }
   }
-  return "clean";
+  return true;
+}
+function classifyTackleFoul(tackler, victim, ball) {
+  if (!victim.hasBall || victim.team === tackler.team) return "none";
+  if (tackler.actionState !== "tackle") return "none";
+  const dxToVictim = victim.position.x - tackler.position.x;
+  const dzToVictim = victim.position.z - tackler.position.z;
+  const distToVictim = Math.hypot(dxToVictim, dzToVictim);
+  const distToBall = Math.hypot(
+    ball.position.x - tackler.position.x,
+    ball.position.z - tackler.position.z
+  );
+  if (distToVictim > TACKLE_REACH && distToBall > TACKLE_REACH) return "none";
+  if (distToBall <= 1.05 && distToBall <= distToVictim + 0.25) {
+    return "clean";
+  }
+  if (distToVictim <= 0.78 && distToBall > 1.15 && distToBall > distToVictim * 1.45) {
+    const victimFwdX = Math.sin(victim.facingAngle);
+    const victimFwdZ = Math.cos(victim.facingAngle);
+    const invDist = distToVictim > 1e-3 ? 1 / distToVictim : 1;
+    const fromVictimX = -dxToVictim * invDist;
+    const fromVictimZ = -dzToVictim * invDist;
+    const behindDot = fromVictimX * victimFwdX + fromVictimZ * victimFwdZ;
+    const toVictimX = dxToVictim * invDist;
+    const toVictimZ = dzToVictim * invDist;
+    const closingSpeed = tackler.velocity.x * toVictimX + tackler.velocity.z * toVictimZ;
+    if (behindDot < -0.35 && closingSpeed >= 4.5) {
+      return isInsidePenaltyArea(victim.position.x, victim.position.z, tackler.team) ? "penalty" : "free_kick";
+    }
+  }
+  if (distToBall <= TACKLE_REACH * 0.88) {
+    return "clean";
+  }
+  return "none";
 }
 function computeSetPieceSetup(type, rawSpot, restartTeam, players, ball) {
   const attackDir = restartTeam === "home" ? 1 : -1;
@@ -2622,6 +2660,12 @@ var MatchEngine = class {
       return;
     }
     const taker = sp.takerId ? this.players.find((p) => p.id === sp.takerId) ?? null : null;
+    if (!taker) {
+      this.phase = "live";
+      this.setPiece = null;
+      this.emitHudSnapshot();
+      return;
+    }
     const isHumanTaker = sp.team === "home" || sp.team === "away" && this.awayHumanControl && Boolean(awayInput);
     const takerInput = sp.team === "home" ? homeInput : awayInput ?? homeInput;
     const defendingInput = sp.team === "home" ? awayInput : homeInput;
@@ -2905,19 +2949,23 @@ var MatchEngine = class {
       p.velocity.z = steering.diveDir * 7.6;
     }
     if (steering.shouldTackle && !p.hasBall && p.tackleCooldown <= 0 && p.actionState !== "tackle" && p.actionState !== "dive") {
-      const dx = this.ball.position.x - p.position.x;
-      const dz = this.ball.position.z - p.position.z;
-      const len = Math.hypot(dx, dz) || 1;
-      const nx = dx / len;
-      const nz = dz / len;
-      p.facingAngle = Math.atan2(nx, nz);
-      p.velocity.x = nx * 10.6;
-      p.velocity.z = nz * 10.6;
-      p.actionState = "tackle";
-      p.actionTimer = 0.34;
-      p.tackleCooldown = 1.05;
-      this.attemptTackleSteal(p);
-      if (this.phase === "setpiece") return;
+      const ballOwner = this.ball.ownerId !== null ? this.players.find((pl) => pl.id === this.ball.ownerId) ?? null : null;
+      const canTackleCleanly = !ballOwner || ballOwner.team !== p.team && isCleanTackleAngle(p, ballOwner, this.ball);
+      if (canTackleCleanly) {
+        const dx = this.ball.position.x - p.position.x;
+        const dz = this.ball.position.z - p.position.z;
+        const len = Math.hypot(dx, dz) || 1;
+        const nx = dx / len;
+        const nz = dz / len;
+        p.facingAngle = Math.atan2(nx, nz);
+        p.velocity.x = nx * 10.6;
+        p.velocity.z = nz * 10.6;
+        p.actionState = "tackle";
+        p.actionTimer = 0.34;
+        p.tackleCooldown = 1.05;
+        this.attemptTackleSteal(p);
+        if (this.phase === "setpiece") return;
+      }
     }
     if (p.actionState === "dive") {
       p.velocity.x *= Math.pow(0.88, dt * 60);
@@ -2976,6 +3024,7 @@ var MatchEngine = class {
     }
   }
   attemptTackleSteal(tackler) {
+    if (this.phase !== "live" || tackler.actionState !== "tackle") return;
     if (this.ball.ownerId === null) {
       const d = Math.hypot(
         this.ball.position.x - tackler.position.x,
@@ -2992,6 +3041,8 @@ var MatchEngine = class {
     if (outcome === "free_kick" || outcome === "penalty") {
       if (tackler.team === "home") this.stats.homeFouls += 1;
       else this.stats.awayFouls += 1;
+      tackler.actionState = "idle";
+      tackler.actionTimer = 0;
       tackler.tackleCooldown = 1.6;
       this.triggerSetPiece(outcome, owner.team, { ...owner.position });
       return;
@@ -3269,274 +3320,848 @@ function buildSquad(prefix, names, bootsPrimary, bootsAlt, ratingOffset) {
   );
 }
 var TEAMS = [
+  // ========================
+  // EUROPEAN CLUBS (14)
+  // ========================
   {
     id: "aurelia",
-    name: "Aurelia FC",
-    shortName: "AUR",
-    city: "Solano",
+    name: "Real Madrid",
+    shortName: "RMA",
+    city: "Madrid",
+    region: "europe",
     kit: {
-      primary: "#0f62fe",
-      secondary: "#f5f8ff",
-      shorts: "#0a2558",
-      socks: "#0f62fe",
+      primary: "#f8fafc",
+      secondary: "#1e3a8a",
+      shorts: "#f8fafc",
+      socks: "#f8fafc",
       gkPrimary: "#f59e0b",
       gkSecondary: "#1f2937"
     },
-    rating: { attack: 84, midfield: 82, defense: 80 },
+    rating: { attack: 89, midfield: 87, defense: 85 },
     roster: buildSquad(
-      "aur",
+      "rma",
       [
-        "M. Sorensen",
-        "L. Costa",
-        "D. Kalinic",
-        "R. Belmont",
-        "K. Okafor",
-        "T. Vermeer",
-        "E. Moretti",
-        "N. Lindqvist",
-        "A. Diallo",
-        "J. Navarro",
-        "Y. Takahashi"
+        "T. Courtois",
+        "F. Mendy",
+        "A. Rudiger",
+        "E. Militao",
+        "D. Carvajal",
+        "A. Tchouameni",
+        "F. Valverde",
+        "J. Bellingham",
+        "Vinicius Jr",
+        "K. Mbappe",
+        "Rodrygo"
       ],
       "#f97316",
       "#38bdf8",
-      0.15
+      0.22
     )
   },
   {
     id: "nordic",
-    name: "Nordic United",
-    shortName: "NRD",
-    city: "Bergheim",
+    name: "FC Barcelona",
+    shortName: "BAR",
+    city: "Barcelona",
+    region: "europe",
     kit: {
-      primary: "#dc2626",
-      secondary: "#ffffff",
-      shorts: "#1e293b",
-      socks: "#dc2626",
+      primary: "#1d4ed8",
+      secondary: "#be123c",
+      shorts: "#1e3a8a",
+      socks: "#1d4ed8",
       gkPrimary: "#10b981",
       gkSecondary: "#064e3b"
     },
-    rating: { attack: 82, midfield: 81, defense: 83 },
+    rating: { attack: 87, midfield: 88, defense: 83 },
     roster: buildSquad(
-      "nrd",
+      "bar",
       [
-        "H. Solberg",
-        "P. Kowalski",
-        "B. Alencar",
-        "S. Lindholm",
-        "C. Boateng",
-        "M. Petrov",
-        "F. Delacroix",
-        "O. Vester",
-        "R. Mendoza",
-        "K. Vance",
-        "D. Adebayo"
+        "M. ter Stegen",
+        "A. Balde",
+        "R. Araujo",
+        "P. Cubarsi",
+        "J. Kounde",
+        "F. de Jong",
+        "Pedri",
+        "Gavi",
+        "Raphinha",
+        "R. Lewandowski",
+        "L. Yamal"
       ],
-      "#eab308",
-      "#f8fafc",
-      0.08
+      "#facc15",
+      "#fb7185",
+      0.19
     )
   },
   {
     id: "valoria",
-    name: "Valoria Athletic",
-    shortName: "VAL",
-    city: "Miramar",
+    name: "Manchester City",
+    shortName: "MCI",
+    city: "Manchester",
+    region: "europe",
     kit: {
-      primary: "#14b8a6",
-      secondary: "#0f172a",
-      shorts: "#0f172a",
-      socks: "#14b8a6",
-      gkPrimary: "#e11d48",
+      primary: "#38bdf8",
+      secondary: "#ffffff",
+      shorts: "#f8fafc",
+      socks: "#38bdf8",
+      gkPrimary: "#f97316",
+      gkSecondary: "#1f2937"
+    },
+    rating: { attack: 88, midfield: 89, defense: 85 },
+    roster: buildSquad(
+      "mci",
+      [
+        "Ederson",
+        "J. Gvardiol",
+        "R. Dias",
+        "J. Stones",
+        "K. Walker",
+        "Rodri",
+        "K. De Bruyne",
+        "B. Silva",
+        "J. Doku",
+        "E. Haaland",
+        "P. Foden"
+      ],
+      "#22c55e",
+      "#f43f5e",
+      0.21
+    )
+  },
+  {
+    id: "metro",
+    name: "Manchester United",
+    shortName: "MUN",
+    city: "Manchester",
+    region: "europe",
+    kit: {
+      primary: "#dc2626",
+      secondary: "#ffffff",
+      shorts: "#f8fafc",
+      socks: "#111827",
+      gkPrimary: "#22c55e",
+      gkSecondary: "#14532d"
+    },
+    rating: { attack: 83, midfield: 82, defense: 81 },
+    roster: buildSquad(
+      "mun",
+      [
+        "A. Onana",
+        "L. Shaw",
+        "L. Martinez",
+        "M. de Ligt",
+        "D. Dalot",
+        "Casemiro",
+        "K. Mainoo",
+        "B. Fernandes",
+        "M. Rashford",
+        "R. Hojlund",
+        "A. Garnacho"
+      ],
+      "#38bdf8",
+      "#facc15",
+      0.11
+    )
+  },
+  {
+    id: "solaris",
+    name: "Liverpool",
+    shortName: "LIV",
+    city: "Liverpool",
+    region: "europe",
+    kit: {
+      primary: "#b91c1c",
+      secondary: "#fef2f2",
+      shorts: "#b91c1c",
+      socks: "#b91c1c",
+      gkPrimary: "#eab308",
+      gkSecondary: "#1f2937"
+    },
+    rating: { attack: 87, midfield: 85, defense: 86 },
+    roster: buildSquad(
+      "liv",
+      [
+        "Alisson",
+        "A. Robertson",
+        "V. van Dijk",
+        "I. Konate",
+        "T. Alexander-Arnold",
+        "R. Gravenberch",
+        "A. Mac Allister",
+        "D. Szoboszlai",
+        "L. Diaz",
+        "D. Jota",
+        "M. Salah"
+      ],
+      "#fb923c",
+      "#fde047",
+      0.18
+    )
+  },
+  {
+    id: "ironport",
+    name: "Arsenal",
+    shortName: "ARS",
+    city: "London",
+    region: "europe",
+    kit: {
+      primary: "#ef4444",
+      secondary: "#ffffff",
+      shorts: "#f8fafc",
+      socks: "#ef4444",
+      gkPrimary: "#a3e635",
+      gkSecondary: "#1e293b"
+    },
+    rating: { attack: 85, midfield: 86, defense: 87 },
+    roster: buildSquad(
+      "ars",
+      [
+        "D. Raya",
+        "J. Timber",
+        "W. Saliba",
+        "Gabriel",
+        "B. White",
+        "D. Rice",
+        "M. Odegaard",
+        "M. Merino",
+        "G. Martinelli",
+        "K. Havertz",
+        "B. Saka"
+      ],
+      "#f43f5e",
+      "#38bdf8",
+      0.17
+    )
+  },
+  {
+    id: "verde",
+    name: "Chelsea",
+    shortName: "CHE",
+    city: "London",
+    region: "europe",
+    kit: {
+      primary: "#1e40af",
+      secondary: "#ffffff",
+      shorts: "#1e40af",
+      socks: "#f8fafc",
+      gkPrimary: "#f59e0b",
       gkSecondary: "#111827"
     },
-    rating: { attack: 80, midfield: 84, defense: 79 },
+    rating: { attack: 84, midfield: 83, defense: 82 },
     roster: buildSquad(
-      "val",
+      "che",
       [
-        "I. Alvarez",
-        "G. Romero",
-        "A. Mensah",
-        "V. Novak",
-        "L. Salgado",
-        "J. Ferreira",
-        "C. Darzi",
-        "T. Watanabe",
-        "S. Benali",
-        "E. Delgado",
-        "M. Camara"
+        "R. Sanchez",
+        "M. Cucurella",
+        "L. Colwill",
+        "W. Fofana",
+        "R. James",
+        "M. Caicedo",
+        "E. Fernandez",
+        "C. Palmer",
+        "P. Neto",
+        "N. Jackson",
+        "N. Madueke"
       ],
-      "#a855f7",
+      "#38bdf8",
+      "#facc15",
+      0.13
+    )
+  },
+  {
+    id: "caspian",
+    name: "Bayern Munich",
+    shortName: "BAY",
+    city: "Munich",
+    region: "europe",
+    kit: {
+      primary: "#dc2626",
+      secondary: "#f8fafc",
+      shorts: "#dc2626",
+      socks: "#dc2626",
+      gkPrimary: "#22d3ee",
+      gkSecondary: "#0f172a"
+    },
+    rating: { attack: 88, midfield: 86, defense: 85 },
+    roster: buildSquad(
+      "bay",
+      [
+        "M. Neuer",
+        "A. Davies",
+        "D. Upamecano",
+        "M. Kim",
+        "J. Kimmich",
+        "J. Palhinha",
+        "L. Goretzka",
+        "J. Musiala",
+        "L. Sane",
+        "H. Kane",
+        "M. Olise"
+      ],
+      "#a3e635",
+      "#f8fafc",
+      0.2
+    )
+  },
+  {
+    id: "dortmund",
+    name: "Borussia Dortmund",
+    shortName: "BVB",
+    city: "Dortmund",
+    region: "europe",
+    kit: {
+      primary: "#facc15",
+      secondary: "#111827",
+      shorts: "#111827",
+      socks: "#facc15",
+      gkPrimary: "#0ea5e9",
+      gkSecondary: "#0f172a"
+    },
+    rating: { attack: 84, midfield: 82, defense: 81 },
+    roster: buildSquad(
+      "bvb",
+      [
+        "G. Kobel",
+        "R. Bensebaini",
+        "N. Schlotterbeck",
+        "W. Anton",
+        "J. Ryerson",
+        "E. Can",
+        "M. Sabitzer",
+        "J. Brandt",
+        "K. Adeyemi",
+        "S. Guirassy",
+        "D. Malen"
+      ],
+      "#f97316",
+      "#111827",
+      0.12
+    )
+  },
+  {
+    id: "psg",
+    name: "Paris Saint-Germain",
+    shortName: "PSG",
+    city: "Paris",
+    region: "europe",
+    kit: {
+      primary: "#0f172a",
+      secondary: "#dc2626",
+      shorts: "#0f172a",
+      socks: "#0f172a",
+      gkPrimary: "#22c55e",
+      gkSecondary: "#052e16"
+    },
+    rating: { attack: 86, midfield: 85, defense: 84 },
+    roster: buildSquad(
+      "psg",
+      [
+        "G. Donnarumma",
+        "N. Mendes",
+        "Marquinhos",
+        "W. Pacho",
+        "A. Hakimi",
+        "Vitinha",
+        "J. Neves",
+        "W. Zaire-Emery",
+        "B. Barcola",
+        "G. Ramos",
+        "O. Dembele"
+      ],
+      "#fb7185",
+      "#38bdf8",
+      0.16
+    )
+  },
+  {
+    id: "inter",
+    name: "Inter Milan",
+    shortName: "INT",
+    city: "Milan",
+    region: "europe",
+    kit: {
+      primary: "#1d4ed8",
+      secondary: "#0f172a",
+      shorts: "#0f172a",
+      socks: "#1d4ed8",
+      gkPrimary: "#f59e0b",
+      gkSecondary: "#1c1917"
+    },
+    rating: { attack: 86, midfield: 86, defense: 86 },
+    roster: buildSquad(
+      "int",
+      [
+        "Y. Sommer",
+        "F. Dimarco",
+        "A. Bastoni",
+        "F. Acerbi",
+        "D. Dumfries",
+        "H. Calhanoglu",
+        "N. Barella",
+        "H. Mkhitaryan",
+        "M. Thuram",
+        "L. Martinez",
+        "M. Taremi"
+      ],
+      "#38bdf8",
+      "#facc15",
+      0.17
+    )
+  },
+  {
+    id: "milan",
+    name: "AC Milan",
+    shortName: "ACM",
+    city: "Milan",
+    region: "europe",
+    kit: {
+      primary: "#b91c1c",
+      secondary: "#111827",
+      shorts: "#111827",
+      socks: "#111827",
+      gkPrimary: "#14b8a6",
+      gkSecondary: "#0f172a"
+    },
+    rating: { attack: 84, midfield: 83, defense: 82 },
+    roster: buildSquad(
+      "acm",
+      [
+        "M. Maignan",
+        "T. Hernandez",
+        "F. Tomori",
+        "M. Thiaw",
+        "D. Calabria",
+        "Y. Fofana",
+        "T. Reijnders",
+        "R. Loftus-Cheek",
+        "R. Leao",
+        "A. Morata",
+        "C. Pulisic"
+      ],
+      "#f43f5e",
+      "#f8fafc",
+      0.13
+    )
+  },
+  {
+    id: "juventus",
+    name: "Juventus",
+    shortName: "JUV",
+    city: "Turin",
+    region: "europe",
+    kit: {
+      primary: "#1e293b",
+      secondary: "#ffffff",
+      shorts: "#0f172a",
+      socks: "#ffffff",
+      gkPrimary: "#eab308",
+      gkSecondary: "#1e293b"
+    },
+    rating: { attack: 83, midfield: 83, defense: 85 },
+    roster: buildSquad(
+      "juv",
+      [
+        "M. Di Gregorio",
+        "A. Cambiaso",
+        "Bremer",
+        "F. Gatti",
+        "P. Kalulu",
+        "M. Locatelli",
+        "K. Thuram",
+        "T. Koopmeiners",
+        "K. Yildiz",
+        "D. Vlahovic",
+        "F. Conceicao"
+      ],
+      "#e2e8f0",
+      "#f97316",
+      0.12
+    )
+  },
+  {
+    id: "atletico",
+    name: "Atl\xE9tico Madrid",
+    shortName: "ATM",
+    city: "Madrid",
+    region: "europe",
+    kit: {
+      primary: "#e11d48",
+      secondary: "#ffffff",
+      shorts: "#1e3a8a",
+      socks: "#e11d48",
+      gkPrimary: "#10b981",
+      gkSecondary: "#064e3b"
+    },
+    rating: { attack: 85, midfield: 84, defense: 85 },
+    roster: buildSquad(
+      "atm",
+      [
+        "J. Oblak",
+        "J. Galan",
+        "J. Gimenez",
+        "R. Le Normand",
+        "M. Llorente",
+        "Koke",
+        "R. De Paul",
+        "C. Gallagher",
+        "A. Griezmann",
+        "J. Alvarez",
+        "A. Sorloth"
+      ],
+      "#f43f5e",
+      "#38bdf8",
+      0.15
+    )
+  },
+  // ========================
+  // AFRICAN CLUBS (10)
+  // ========================
+  {
+    id: "alahly",
+    name: "Al Ahly",
+    shortName: "AHL",
+    city: "Cairo",
+    region: "africa",
+    kit: {
+      primary: "#dc2626",
+      secondary: "#ffffff",
+      shorts: "#f8fafc",
+      socks: "#dc2626",
+      gkPrimary: "#0ea5e9",
+      gkSecondary: "#0f172a"
+    },
+    rating: { attack: 82, midfield: 81, defense: 81 },
+    roster: buildSquad(
+      "ahl",
+      [
+        "M. El Shenawy",
+        "A. Maaloul",
+        "Y. Ibrahim",
+        "R. Rabia",
+        "M. Hany",
+        "M. Attia",
+        "E. Ashour",
+        "A. El Solia",
+        "H. El Shahat",
+        "W. Abou Ali",
+        "P. Tau"
+      ],
+      "#facc15",
+      "#38bdf8",
+      0.09
+    )
+  },
+  {
+    id: "zamalek",
+    name: "Zamalek",
+    shortName: "ZAM",
+    city: "Cairo",
+    region: "africa",
+    kit: {
+      primary: "#f1f5f9",
+      secondary: "#dc2626",
+      shorts: "#f1f5f9",
+      socks: "#f1f5f9",
+      gkPrimary: "#22c55e",
+      gkSecondary: "#052e16"
+    },
+    rating: { attack: 80, midfield: 79, defense: 78 },
+    roster: buildSquad(
+      "zam",
+      [
+        "M. Awad",
+        "A. Fatouh",
+        "H. Abdelmaguid",
+        "M. Hamdy",
+        "O. Gaber",
+        "N. Emad",
+        "A. El Said",
+        "N. Maher",
+        "M. Shalaby",
+        "S. Jaziri",
+        "Zizo"
+      ],
+      "#ef4444",
+      "#facc15",
+      0.05
+    )
+  },
+  {
+    id: "wydad",
+    name: "Wydad AC",
+    shortName: "WAC",
+    city: "Casablanca",
+    region: "africa",
+    kit: {
+      primary: "#e11d48",
+      secondary: "#ffffff",
+      shorts: "#ffffff",
+      socks: "#e11d48",
+      gkPrimary: "#eab308",
+      gkSecondary: "#1f2937"
+    },
+    rating: { attack: 80, midfield: 80, defense: 79 },
+    roster: buildSquad(
+      "wac",
+      [
+        "Y. El Motie",
+        "A. Boutouil",
+        "J. Harkass",
+        "A. Aboulfath",
+        "A. El Amloud",
+        "Y. Jabrane",
+        "M. Moufid",
+        "O. Sakhi",
+        "M. Rayhi",
+        "C. Mailula",
+        "M. Ounajem"
+      ],
+      "#f8fafc",
+      "#fbbf24",
+      0.06
+    )
+  },
+  {
+    id: "raja",
+    name: "Raja CA",
+    shortName: "RCA",
+    city: "Casablanca",
+    region: "africa",
+    kit: {
+      primary: "#16a34a",
+      secondary: "#ffffff",
+      shorts: "#f8fafc",
+      socks: "#16a34a",
+      gkPrimary: "#f97316",
+      gkSecondary: "#1c1917"
+    },
+    rating: { attack: 80, midfield: 81, defense: 79 },
+    roster: buildSquad(
+      "rca",
+      [
+        "A. Zniti",
+        "Y. Belammari",
+        "A. Khafifi",
+        "B. Benoun",
+        "M. Boulacsout",
+        "M. Zrida",
+        "S. Bougrine",
+        "A. Ennafati",
+        "Y. Bouzok",
+        "N. Zerhouni",
+        "H. Rahimi"
+      ],
+      "#a3e635",
+      "#38bdf8",
+      0.07
+    )
+  },
+  {
+    id: "esperance",
+    name: "Esp\xE9rance de Tunis",
+    shortName: "EST",
+    city: "Tunis",
+    region: "africa",
+    kit: {
+      primary: "#eab308",
+      secondary: "#dc2626",
+      shorts: "#111827",
+      socks: "#eab308",
+      gkPrimary: "#2563eb",
+      gkSecondary: "#0f172a"
+    },
+    rating: { attack: 81, midfield: 80, defense: 80 },
+    roster: buildSquad(
+      "est",
+      [
+        "A. Memmiche",
+        "M. Ben Hamida",
+        "Y. Meriah",
+        "M. Tougai",
+        "R. Bouchniba",
+        "R. Aholou",
+        "H. Tka",
+        "Y. Sasse",
+        "Y. Belaili",
+        "R. Rodrigues",
+        "E. Mokwana"
+      ],
+      "#ef4444",
+      "#fde047",
+      0.08
+    )
+  },
+  {
+    id: "mazembe",
+    name: "TP Mazembe",
+    shortName: "TPM",
+    city: "Lubumbashi",
+    region: "africa",
+    kit: {
+      primary: "#18181b",
+      secondary: "#f8fafc",
+      shorts: "#18181b",
+      socks: "#f8fafc",
+      gkPrimary: "#f59e0b",
+      gkSecondary: "#1e293b"
+    },
+    rating: { attack: 79, midfield: 79, defense: 80 },
+    roster: buildSquad(
+      "tpm",
+      [
+        "A. Faty",
+        "E. Luzolo",
+        "K. Mondeko",
+        "J. Ntambwe",
+        "I. Keita",
+        "A. Oladapo",
+        "G. Likonza",
+        "B. Zemanga",
+        "C. Fofana",
+        "F. Traore",
+        "P. Kinzumbi"
+      ],
+      "#facc15",
       "#22c55e",
       0.05
     )
   },
   {
-    id: "metro",
-    name: "Metro Rovers",
-    shortName: "MTR",
-    city: "Harbor City",
+    id: "sundowns",
+    name: "Mamelodi Sundowns",
+    shortName: "MSF",
+    city: "Pretoria",
+    region: "africa",
     kit: {
-      primary: "#f59e0b",
-      secondary: "#111827",
-      shorts: "#111827",
-      socks: "#f59e0b",
-      gkPrimary: "#6366f1",
+      primary: "#facc15",
+      secondary: "#15803d",
+      shorts: "#1d4ed8",
+      socks: "#f8fafc",
+      gkPrimary: "#7c3aed",
       gkSecondary: "#1e1b4b"
     },
-    rating: { attack: 79, midfield: 79, defense: 81 },
+    rating: { attack: 82, midfield: 82, defense: 80 },
     roster: buildSquad(
-      "mtr",
+      "msf",
       [
-        "K. Gallagher",
-        "J. Tanaka",
-        "E. Traore",
-        "N. Rossi",
-        "B. Almeida",
-        "H. Demir",
-        "R. MacLeod",
-        "P. Silva",
-        "W. Mensah",
-        "L. Ortega",
-        "F. Nkosi"
+        "R. Williams",
+        "A. Modiba",
+        "G. Kekana",
+        "M. Mvala",
+        "K. Mudau",
+        "T. Mokoena",
+        "M. Allende",
+        "T. Zwane",
+        "L. Ribeiro",
+        "P. Shalulile",
+        "I. Rayners"
       ],
-      "#ef4444",
-      "#06b6d4",
-      0
+      "#22c55e",
+      "#38bdf8",
+      0.09
     )
   },
   {
-    id: "solaris",
-    name: "Solaris Sporting",
-    shortName: "SOL",
-    city: "Alba Vista",
+    id: "pyramids",
+    name: "Pyramids FC",
+    shortName: "PYR",
+    city: "Cairo",
+    region: "africa",
     kit: {
-      primary: "#7c3aed",
-      secondary: "#f5f3ff",
-      shorts: "#1e1b4b",
-      socks: "#7c3aed",
-      gkPrimary: "#facc15",
-      gkSecondary: "#1f2937"
+      primary: "#1e3a8a",
+      secondary: "#38bdf8",
+      shorts: "#1e3a8a",
+      socks: "#38bdf8",
+      gkPrimary: "#f97316",
+      gkSecondary: "#111827"
     },
-    rating: { attack: 83, midfield: 80, defense: 78 },
+    rating: { attack: 81, midfield: 80, defense: 79 },
     roster: buildSquad(
-      "sol",
+      "pyr",
       [
-        "R. Carvalho",
-        "A. Morales",
-        "L. Benitez",
-        "D. Kovac",
-        "S. Boateng",
-        "M. Ribeiro",
-        "I. Santoro",
-        "E. Alcaraz",
-        "T. Osei",
-        "G. Castelo",
-        "H. Sato"
+        "A. El Shenawy",
+        "M. Hamdy",
+        "A. Samy",
+        "A. Gabr",
+        "M. Chibi",
+        "B. Toure",
+        "M. Lasheen",
+        "W. El Karti",
+        "I. Adel",
+        "F. Mayele",
+        "M. Fathi"
       ],
+      "#38bdf8",
       "#facc15",
-      "#e879f9",
       0.07
     )
   },
   {
-    id: "ironport",
-    name: "Ironport City",
-    shortName: "IRN",
-    city: "Ironport",
+    id: "farrabat",
+    name: "FAR Rabat",
+    shortName: "FAR",
+    city: "Rabat",
+    region: "africa",
     kit: {
-      primary: "#475569",
-      secondary: "#f8fafc",
+      primary: "#15803d",
+      secondary: "#dc2626",
+      shorts: "#111827",
+      socks: "#15803d",
+      gkPrimary: "#eab308",
+      gkSecondary: "#0f172a"
+    },
+    rating: { attack: 79, midfield: 80, defense: 79 },
+    roster: buildSquad(
+      "far",
+      [
+        "A. El Khayati",
+        "T. Carneiro",
+        "H. Nakach",
+        "E. Inonga",
+        "M. Moufid",
+        "M. Hrimat",
+        "Z. Derrag",
+        "A. Hammoudan",
+        "A. Zouhzouh",
+        "J. Beya",
+        "K. Ait Ourkhane"
+      ],
+      "#ef4444",
+      "#22c55e",
+      0.05
+    )
+  },
+  {
+    id: "usmalger",
+    name: "USM Alger",
+    shortName: "USM",
+    city: "Algiers",
+    region: "africa",
+    kit: {
+      primary: "#b91c1c",
+      secondary: "#0f172a",
       shorts: "#0f172a",
-      socks: "#475569",
-      gkPrimary: "#f97316",
-      gkSecondary: "#111827"
+      socks: "#b91c1c",
+      gkPrimary: "#10b981",
+      gkSecondary: "#064e3b"
     },
-    rating: { attack: 78, midfield: 80, defense: 84 },
+    rating: { attack: 78, midfield: 79, defense: 80 },
     roster: buildSquad(
-      "irn",
+      "usm",
       [
-        "C. McAllister",
-        "J. Ward",
-        "O. Brennan",
-        "N. Lind",
-        "K. Doyle",
-        "B. Reid",
-        "A. Fraser",
-        "D. Byrne",
-        "M. Brooks",
-        "S. Callaghan",
-        "L. Kemp"
+        "O. Benbot",
+        "S. Radouani",
+        "Z. Belaid",
+        "A. Alilet",
+        "H. Dehiri",
+        "O. Chita",
+        "B. Benzaza",
+        "I. Merili",
+        "H. Ghacha",
+        "I. Belkacemi",
+        "A. Bousseliou"
       ],
-      "#38bdf8",
       "#f97316",
-      0.03
-    )
-  },
-  {
-    id: "verde",
-    name: "Verde Atl\xE9tico",
-    shortName: "VRD",
-    city: "Palma Nova",
-    kit: {
-      primary: "#16a34a",
-      secondary: "#f0fdf4",
-      shorts: "#14532d",
-      socks: "#16a34a",
-      gkPrimary: "#38bdf8",
-      gkSecondary: "#0f172a"
-    },
-    rating: { attack: 81, midfield: 82, defense: 80 },
-    roster: buildSquad(
-      "vrd",
-      [
-        "P. Herrera",
-        "F. Guzman",
-        "R. Paredes",
-        "T. Silva",
-        "E. Rojas",
-        "J. Vargas",
-        "L. Molina",
-        "M. Quiroga",
-        "C. Mendoza",
-        "D. Montoya",
-        "A. Cruz"
-      ],
-      "#facc15",
-      "#ffffff",
-      0.06
-    )
-  },
-  {
-    id: "caspian",
-    name: "Caspian SC",
-    shortName: "CSP",
-    city: "Port Meridian",
-    kit: {
-      primary: "#ea580c",
-      secondary: "#fff7ed",
-      shorts: "#1c1917",
-      socks: "#ea580c",
-      gkPrimary: "#22d3ee",
-      gkSecondary: "#0f172a"
-    },
-    rating: { attack: 81, midfield: 79, defense: 79 },
-    roster: buildSquad(
-      "csp",
-      [
-        "A. Karimov",
-        "N. Aliyev",
-        "M. Dragovic",
-        "I. Petrovic",
-        "R. Mammadov",
-        "T. Hasanov",
-        "D. Popov",
-        "S. Yusupov",
-        "K. Arslan",
-        "V. Orlov",
-        "E. Turan"
-      ],
-      "#a3e635",
       "#f8fafc",
       0.04
     )

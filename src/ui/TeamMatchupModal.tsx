@@ -23,6 +23,12 @@ export function TeamMatchupModal({
   onClose,
 }: TeamMatchupModalProps) {
   const [pickingSide, setPickingSide] = useState<'user' | 'robot'>('user');
+  const [regionFilter, setRegionFilter] = useState<'all' | 'europe' | 'africa'>('all');
+
+  const europeanCount = TEAMS.filter((t) => t.region === 'europe').length;
+  const africanCount = TEAMS.filter((t) => t.region === 'africa').length;
+  const filteredTeams =
+    regionFilter === 'all' ? TEAMS : TEAMS.filter((t) => t.region === regionFilter);
 
   return (
     <div
@@ -146,19 +152,41 @@ export function TeamMatchupModal({
             </div>
           </div>
 
-          {/* 8-Club Selection Grid */}
+          {/* Club Selection Grid with Europe / Afrique Filter */}
           <div>
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
               <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
                 {pickingSide === 'user'
                   ? 'Cliquez pour choisir votre équipe :'
                   : 'Cliquez pour choisir l’équipe du Robot (IA) :'}
               </span>
-              <span className="text-[11px] text-slate-400">8 clubs disponibles</span>
+              <div className="flex items-center gap-1.5">
+                {(
+                  [
+                    { id: 'all', label: `Tous (${TEAMS.length})` },
+                    { id: 'europe', label: `Europe (${europeanCount})` },
+                    { id: 'africa', label: `Afrique (${africanCount})` },
+                  ] as const
+                ).map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    data-testid={`filter-region-${tab.id}`}
+                    onClick={() => setRegionFilter(tab.id)}
+                    className={`px-2.5 py-1 rounded text-[11px] font-bold uppercase tracking-wider cursor-pointer transition-colors ${
+                      regionFilter === tab.id
+                        ? 'bg-emerald-500 text-slate-950'
+                        : 'bg-[#09121e] text-slate-300 border border-white/12 hover:border-white/30'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              {TEAMS.map((team) => {
+              {filteredTeams.map((team) => {
                 const isUserTeam = team.id === homeTeam.id;
                 const isRobotTeam = team.id === awayTeam.id;
                 const isSelectedForActiveSide =
@@ -187,7 +215,7 @@ export function TeamMatchupModal({
                     <div className="flex items-center justify-between gap-1.5">
                       <div className="flex items-center gap-1.5 min-w-0">
                         <span
-                          className="w-3 h-3 rounded-xs shrink-0"
+                          className="w-3 h-3 rounded-xs shrink-0 border border-white/25"
                           style={{ backgroundColor: team.kit.primary }}
                         />
                         <span className="font-display font-bold text-base text-white truncate">

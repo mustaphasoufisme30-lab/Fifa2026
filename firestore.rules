@@ -40,7 +40,23 @@ service cloud.firestore {
         'solaris',
         'ironport',
         'verde',
-        'caspian'
+        'caspian',
+        'dortmund',
+        'psg',
+        'inter',
+        'milan',
+        'juventus',
+        'atletico',
+        'alahly',
+        'zamalek',
+        'wydad',
+        'raja',
+        'esperance',
+        'mazembe',
+        'sundowns',
+        'pyramids',
+        'farrabat',
+        'usmalger'
       ];
     }
 

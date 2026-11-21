@@ -207,29 +207,9 @@ export function MatchHud({
           </div>
         </div>
 
-        {/* Mobile Controlled Player Indicator (cleanly stacked under scoreboard on <sm) */}
-        <div className="flex sm:hidden flex-col items-start gap-1">
-          <div className="flex items-center gap-2 px-2.5 py-1 rounded-md bg-[#09121e]/88 border border-white/15 shadow-md">
-            <span className="font-display font-bold text-xs text-amber-400 tabular-nums">
-              #{snapshot.controlledPlayerNumber}
-            </span>
-            <span className="text-[11px] font-semibold text-white whitespace-nowrap">
-              {snapshot.controlledPlayerName}
-            </span>
-            <span className="text-[10px] text-slate-400 font-medium">
-              {snapshot.controlledPlayerRole}
-            </span>
-            <div className="w-12 h-1.5 rounded-full bg-slate-800 overflow-hidden">
-              <div
-                className={`h-full transition-all duration-100 ${
-                  snapshot.controlledStamina > 35 ? 'bg-emerald-400' : 'bg-amber-500'
-                }`}
-                style={{ width: `${snapshot.controlledStamina}%` }}
-              />
-            </div>
-          </div>
-
-          {snapshot.controlledShotCharge > 0.02 && (
+        {/* Mobile Shot Charge Indicator (only visible while actively charging a shot on <sm) */}
+        {snapshot.controlledShotCharge > 0.02 && (
+          <div className="flex sm:hidden flex-col items-start gap-1">
             <div
               data-testid="shot-charge-bar-mobile"
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#09121e]/92 border border-amber-400/50 shadow-md"
@@ -250,8 +230,8 @@ export function MatchHud({
                 />
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
 
       {/* Live Replay Indicator + Skip */}
@@ -317,8 +297,8 @@ export function MatchHud({
         </div>
       )}
 
-      {/* Bottom Center (Desktop/Tablet): Shot Gauge + Controlled Player + Radar */}
-      <div className="hidden sm:flex fixed bottom-3 left-1/2 -translate-x-1/2 flex-col items-center gap-1.5 pointer-events-none">
+      {/* Bottom Center: Shot Gauge (only while charging) + Live Pitch Mini-Radar */}
+      <div className="hidden sm:flex fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-1/2 -translate-x-1/2 flex-col items-center gap-1.5 pointer-events-none">
         {snapshot.controlledShotCharge > 0.02 && (
           <div
             data-testid="shot-charge-bar"
@@ -341,30 +321,6 @@ export function MatchHud({
             </div>
           </div>
         )}
-
-        {/* Controlled Player Name & Stamina + Active Tactics */}
-        <div className="flex items-center gap-2.5 px-3 py-1 rounded-md bg-[#09121e]/88 border border-white/15 shadow-md">
-          <span className="font-display font-bold text-sm text-amber-400 tabular-nums">
-            #{snapshot.controlledPlayerNumber}
-          </span>
-          <span className="text-xs font-semibold text-white whitespace-nowrap">
-            {snapshot.controlledPlayerName}
-          </span>
-          <span className="text-[11px] text-slate-400 font-medium">
-            {snapshot.controlledPlayerRole}
-          </span>
-          <div className="w-20 h-2 rounded-full bg-slate-800 overflow-hidden">
-            <div
-              className={`h-full transition-all duration-100 ${
-                snapshot.controlledStamina > 35 ? 'bg-emerald-400' : 'bg-amber-500'
-              }`}
-              style={{ width: `${snapshot.controlledStamina}%` }}
-            />
-          </div>
-          <span className="text-[10px] font-semibold text-sky-300 border-l border-white/15 pl-2 uppercase whitespace-nowrap">
-            {snapshot.homeFormation} · {snapshot.homeMentality.slice(0, 3)}
-          </span>
-        </div>
 
         {/* Live Radar Minimap */}
         <canvas

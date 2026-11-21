@@ -12,6 +12,7 @@ import {
   blendArticulatedPose,
   createAnimMemory,
   createDefaultPose,
+  dampFacingAngle,
   evaluateTargetPose,
   PlayerAnimClip,
   PlayerAnimMemory,
@@ -21,12 +22,13 @@ import {
 
 // Shared reusable geometries across all 22 players (created once, zero duplication)
 interface SharedPlayerGeometries {
-  torso: THREE.CylinderGeometry;
+  torso: THREE.LatheGeometry;
   shoulderBridge: THREE.CapsuleGeometry;
-  collar: THREE.TorusGeometry;
+  collarCrew: THREE.TorusGeometry;
+  collarV: THREE.TorusGeometry;
   neck: THREE.CylinderGeometry;
   pelvis: THREE.CylinderGeometry;
-  shortLeg: THREE.CylinderGeometry;
+  shortLeg: THREE.LatheGeometry;
   head: THREE.SphereGeometry;
   hairShort: THREE.SphereGeometry;
   hairFadeTop: THREE.CylinderGeometry;
@@ -35,14 +37,17 @@ interface SharedPlayerGeometries {
   hairMohawk: THREE.CapsuleGeometry;
   hairLongBack: THREE.CapsuleGeometry;
   sleeve: THREE.CylinderGeometry;
+  sleeveCuff: THREE.CylinderGeometry;
   upperArm: THREE.CapsuleGeometry;
   forearm: THREE.CapsuleGeometry;
+  longForearmSleeve: THREE.CylinderGeometry;
   hand: THREE.SphereGeometry;
   glove: THREE.CapsuleGeometry;
-  thigh: THREE.CapsuleGeometry;
-  calfSock: THREE.CapsuleGeometry;
+  thigh: THREE.LatheGeometry;
+  calfSock: THREE.LatheGeometry;
   sockTrim: THREE.CylinderGeometry;
   bootUpper: THREE.CapsuleGeometry;
+  bootAccent: THREE.BoxGeometry;
   bootSole: THREE.BoxGeometry;
   shadow: THREE.CircleGeometry;
   ring: THREE.RingGeometry;
@@ -52,6 +57,7 @@ interface SharedPlayerGeometries {
 
 let sharedGeos: SharedPlayerGeometries | null = null;
 let sharedShadowTex: THREE.CanvasTexture | null = null;
+let sharedFabricBumpTex: THREE.CanvasTexture | null = null;
 
 function createAimChevronGeometry(): THREE.BufferGeometry {
   const shape = new THREE.Shape();
@@ -68,30 +74,72 @@ function createAimChevronGeometry(): THREE.BufferGeometry {
 function getSharedGeometries(): SharedPlayerGeometries {
   if (sharedGeos) return sharedGeos;
 
-  // Sculpted athletic V-tapered torso; rotateY(-PI/2) puts UV seam under right arm,
-  // front chest cleanly at u = 0.25 and back squad number un-mirrored at u = 0.75.
-  const torso = new THREE.CylinderGeometry(0.2, 0.155, 0.5, 12, 1, false);
+  // Sculpted athletic V-tapered footballer torso (LatheGeometry replaces plain cylinder);
+  // rotateY(-PI/2) puts UV seam under right arm, chest crest at u=0.25, un-mirrored back number at u=0.75.
+  const torsoProfile = [
+    new THREE.Vector2(0.146, -0.25),
+    new THREE.Vector2(0.156, -0.15),
+    new THREE.Vector2(0.172, -0.02),
+    new THREE.Vector2(0.196, 0.1),
+    new THREE.Vector2(0.208, 0.19),
+    new THREE.Vector2(0.178, 0.25),
+  ];
+  const torso = new THREE.LatheGeometry(torsoProfile, 14);
   torso.rotateY(-Math.PI / 2);
-  torso.scale(1.18, 1.0, 0.82);
+  torso.scale(1.16, 1.0, 0.82);
+  torso.computeVertexNormals();
 
-  const shoulderBridge = new THREE.CapsuleGeometry(0.095, 0.3, 4, 8);
+  const shoulderBridge = new THREE.CapsuleGeometry(0.094, 0.31, 4, 10);
   shoulderBridge.rotateZ(Math.PI / 2);
-  shoulderBridge.scale(1, 0.84, 0.88);
+  shoulderBridge.scale(1, 0.82, 0.88);
 
-  const collar = new THREE.TorusGeometry(0.086, 0.02, 6, 12);
-  collar.rotateX(Math.PI / 2);
+  const collarCrew = new THREE.TorusGeometry(0.086, 0.021, 6, 12);
+  collarCrew.rotateX(Math.PI / 2);
 
-  const pelvis = new THREE.CylinderGeometry(0.165, 0.172, 0.19, 10);
+  const collarV = new THREE.TorusGeometry(0.092, 0.019, 6, 12);
+  collarV.rotateX(Math.PI / 2);
+  collarV.scale(1.05, 1.0, 1.18);
+
+  const pelvis = new THREE.CylinderGeometry(0.165, 0.174, 0.19, 12);
   pelvis.scale(1.14, 1, 0.84);
 
+  // Tailored athletic football shorts leg with realistic slight flare at hem
+  const shortProfile = [
+    new THREE.Vector2(0.099, -0.115),
+    new THREE.Vector2(0.094, -0.02),
+    new THREE.Vector2(0.098, 0.11),
+  ];
+  const shortLeg = new THREE.LatheGeometry(shortProfile, 10);
+  shortLeg.computeVertexNormals();
+
+  // Sculpted muscular quadriceps thigh tapering naturally toward knee
+  const thighProfile = [
+    new THREE.Vector2(0.06, -0.18),
+    new THREE.Vector2(0.069, -0.06),
+    new THREE.Vector2(0.081, 0.08),
+    new THREE.Vector2(0.078, 0.17),
+  ];
+  const thigh = new THREE.LatheGeometry(thighProfile, 10);
+  thigh.computeVertexNormals();
+
+  // Sculpted lower leg inside football sock (slender ankle -> fuller athletic calf -> knee)
+  const calfProfile = [
+    new THREE.Vector2(0.042, -0.19),
+    new THREE.Vector2(0.049, -0.08),
+    new THREE.Vector2(0.064, 0.06),
+    new THREE.Vector2(0.058, 0.17),
+  ];
+  const calfSock = new THREE.LatheGeometry(calfProfile, 10);
+  calfSock.computeVertexNormals();
+
   const head = new THREE.SphereGeometry(0.13, 14, 12);
-  head.scale(0.93, 1.07, 0.99);
+  head.scale(0.92, 1.08, 0.99);
 
-  const bootUpper = new THREE.CapsuleGeometry(0.052, 0.15, 4, 8);
+  const bootUpper = new THREE.CapsuleGeometry(0.051, 0.155, 4, 8);
   bootUpper.rotateX(Math.PI / 2);
-  bootUpper.scale(1.08, 0.8, 1.0);
+  bootUpper.scale(1.06, 0.76, 1.02);
 
-  const hand = new THREE.SphereGeometry(0.045, 8, 6);
+  const hand = new THREE.SphereGeometry(0.044, 8, 6);
   hand.scale(0.86, 1.15, 0.75);
 
   const hairMohawk = new THREE.CapsuleGeometry(0.03, 0.135, 4, 6);
@@ -100,10 +148,11 @@ function getSharedGeometries(): SharedPlayerGeometries {
   sharedGeos = {
     torso,
     shoulderBridge,
-    collar,
+    collarCrew,
+    collarV,
     neck: new THREE.CylinderGeometry(0.056, 0.065, 0.1, 8),
     pelvis,
-    shortLeg: new THREE.CylinderGeometry(0.096, 0.092, 0.22, 9),
+    shortLeg,
     head,
     hairShort: new THREE.SphereGeometry(0.136, 12, 10, 0, Math.PI * 2, 0, Math.PI * 0.58),
     hairFadeTop: new THREE.CylinderGeometry(0.112, 0.122, 0.074, 10),
@@ -111,19 +160,22 @@ function getSharedGeometries(): SharedPlayerGeometries {
     hairBuzz: new THREE.SphereGeometry(0.133, 10, 8, 0, Math.PI * 2, 0, Math.PI * 0.52),
     hairMohawk,
     hairLongBack: new THREE.CapsuleGeometry(0.085, 0.115, 4, 8),
-    sleeve: new THREE.CylinderGeometry(0.072, 0.062, 0.19, 8),
-    upperArm: new THREE.CapsuleGeometry(0.048, 0.18, 4, 8),
-    forearm: new THREE.CapsuleGeometry(0.04, 0.19, 4, 8),
+    sleeve: new THREE.CylinderGeometry(0.074, 0.062, 0.19, 9),
+    sleeveCuff: new THREE.CylinderGeometry(0.063, 0.062, 0.032, 9),
+    upperArm: new THREE.CapsuleGeometry(0.047, 0.18, 4, 8),
+    forearm: new THREE.CapsuleGeometry(0.039, 0.19, 4, 8),
+    longForearmSleeve: new THREE.CylinderGeometry(0.047, 0.039, 0.22, 8),
     hand,
     glove: new THREE.CapsuleGeometry(0.055, 0.078, 4, 8),
-    thigh: new THREE.CapsuleGeometry(0.074, 0.24, 4, 8),
-    calfSock: new THREE.CapsuleGeometry(0.056, 0.28, 4, 8),
-    sockTrim: new THREE.CylinderGeometry(0.059, 0.059, 0.048, 8),
+    thigh,
+    calfSock,
+    sockTrim: new THREE.CylinderGeometry(0.06, 0.06, 0.048, 10),
     bootUpper,
-    bootSole: new THREE.BoxGeometry(0.102, 0.024, 0.24),
-    shadow: new THREE.CircleGeometry(0.48, 16),
-    ring: new THREE.RingGeometry(0.5, 0.62, 28),
-    marker: new THREE.ConeGeometry(0.13, 0.22, 4),
+    bootAccent: new THREE.BoxGeometry(0.11, 0.024, 0.08),
+    bootSole: new THREE.BoxGeometry(0.102, 0.022, 0.24),
+    shadow: new THREE.CircleGeometry(0.5, 16),
+    ring: new THREE.RingGeometry(0.54, 0.64, 32),
+    marker: new THREE.ConeGeometry(0.14, 0.24, 4),
     aimChevron: createAimChevronGeometry(),
   };
   return sharedGeos;
@@ -136,13 +188,94 @@ function getShadowTexture(): THREE.CanvasTexture {
   canvas.height = 64;
   const ctx = canvas.getContext('2d')!;
   const grad = ctx.createRadialGradient(32, 32, 4, 32, 32, 30);
-  grad.addColorStop(0, 'rgba(0,0,0,0.48)');
-  grad.addColorStop(0.6, 'rgba(0,0,0,0.22)');
+  grad.addColorStop(0, 'rgba(0,0,0,0.52)');
+  grad.addColorStop(0.6, 'rgba(0,0,0,0.24)');
   grad.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, 64, 64);
   sharedShadowTex = new THREE.CanvasTexture(canvas);
   return sharedShadowTex;
+}
+
+// Single shared lightweight woven jersey fabric bump map (128x128) for richer daylight light response
+function getFabricBumpTexture(): THREE.CanvasTexture {
+  if (sharedFabricBumpTex) return sharedFabricBumpTex;
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#808080';
+  ctx.fillRect(0, 0, 128, 128);
+  for (let y = 0; y < 128; y += 2) {
+    ctx.fillStyle = y % 4 === 0 ? 'rgba(255,255,255,0.14)' : 'rgba(0,0,0,0.12)';
+    ctx.fillRect(0, y, 128, 1);
+  }
+  for (let x = 0; x < 128; x += 4) {
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(x, 0, 1, 128);
+  }
+  // Soft vertical athletic torso cloth folds
+  const fold = ctx.createLinearGradient(0, 0, 128, 0);
+  fold.addColorStop(0, 'rgba(0,0,0,0.12)');
+  fold.addColorStop(0.25, 'rgba(255,255,255,0.12)');
+  fold.addColorStop(0.5, 'rgba(0,0,0,0.1)');
+  fold.addColorStop(0.75, 'rgba(255,255,255,0.12)');
+  fold.addColorStop(1, 'rgba(0,0,0,0.12)');
+  ctx.fillStyle = fold;
+  ctx.fillRect(0, 0, 128, 128);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(2, 2);
+  sharedFabricBumpTex = tex;
+  return sharedFabricBumpTex;
+}
+
+type NameplateStyle = 'controlled' | 'carrier' | 'scorer';
+
+function createNameplateTexture(label: string, style: NameplateStyle): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, 256, 64);
+
+  const display = style === 'scorer' ? `★ ${label}` : label;
+  ctx.font =
+    style === 'carrier'
+      ? '700 24px system-ui, -apple-system, sans-serif'
+      : '800 28px system-ui, -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Crisp broadcast drop shadow for effortless readability against sunlit emerald pitch
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = style === 'scorer' ? 'rgba(24, 16, 4, 0.88)' : 'rgba(10, 18, 28, 0.78)';
+  ctx.strokeText(display, 128, 34);
+  ctx.fillStyle = style === 'scorer' ? '#fde047' : style === 'controlled' ? '#ffffff' : '#f1f5f9';
+  ctx.fillText(display, 128, 34);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function getRoleBuildScale(role: PlayerState['role']): { width: number; height: number } {
+  switch (role) {
+    case 'GK':
+      return { width: 1.08, height: 1.11 };
+    case 'CB':
+      return { width: 1.07, height: 1.09 };
+    case 'ST':
+      return { width: 1.04, height: 1.07 };
+    case 'CDM':
+    case 'CM':
+      return { width: 1.03, height: 1.06 };
+    default:
+      return { width: 1.0, height: 1.05 };
+  }
 }
 
 // Reusable material cache shared across players in the active match (reduces WebGL material swaps)
@@ -449,26 +582,39 @@ export class PlayerVisual {
   private readonly controlledMarker: THREE.Mesh;
   private readonly controlledAimPivot: THREE.Group;
   private readonly controlledAimArrow: THREE.Mesh;
+  private nameplateSprite: THREE.Sprite | null = null;
+  private nameplateStyle: NameplateStyle = 'carrier';
+  private readonly playerName: string;
 
   private readonly shadowCasters: THREE.Mesh[] = [];
   private lastShadowCast = true;
   private readonly disposableMaterials: THREE.Material[] = [];
   private readonly disposableTextures: THREE.Texture[] = [];
 
-  // Zero-allocation animation state machine & pose interpolation buffers
+  // Zero-allocation animation state machine, pose interpolation & smooth facing state
   private readonly animMemory: PlayerAnimMemory = createAnimMemory();
   private readonly currentPose: ArticulatedPose = createDefaultPose();
   private readonly targetPose: ArticulatedPose = createDefaultPose();
   private readonly animSignals: PlayerAnimSignals;
+  private visualFacingAngle: number;
+  private prevWorldX: number;
+  private prevWorldZ: number;
   private lastElapsed = -1;
   public lastClip: PlayerAnimClip = 'idle';
 
   constructor(player: PlayerState, kit: TeamKit, materialPool?: PlayerMaterialPool) {
     const geos = getSharedGeometries();
+    const fabricBump = getFabricBumpTexture();
+    this.playerName = player.name;
+    this.visualFacingAngle = player.facingAngle;
+    this.prevWorldX = player.position.x;
+    this.prevWorldZ = player.position.z;
+
     this.root = new THREE.Group();
     this.bodyGroup = new THREE.Group();
-    // Subtle broadcast athletic scale (anchored at y = 0 so cleats stay flush on turf)
-    this.bodyGroup.scale.setScalar(1.07);
+    // Role-calibrated broadcast athletic build (anchored at y = 0 so cleats stay flush on turf)
+    const build = getRoleBuildScale(player.role);
+    this.bodyGroup.scale.set(build.width, build.height, build.width);
     this.root.add(this.bodyGroup);
 
     this.animSignals = {
@@ -522,59 +668,69 @@ export class PlayerVisual {
     const torsoMat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
       map: wrapJerseyTex,
-      roughness: 0.74,
-      metalness: 0.03,
+      bumpMap: fabricBump,
+      bumpScale: 0.007,
+      roughness: 0.78,
+      metalness: 0.02,
     });
     const headMat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
       map: faceTex,
-      roughness: 0.62,
+      roughness: 0.56,
       metalness: 0.02,
     });
     this.disposableMaterials.push(torsoMat, headMat);
 
-    // Pooled materials shared across teammates for mobile performance
+    // Pooled materials shared across teammates for mobile performance & clear PBR contrast
     const jerseySolidMat = getSharedOrOwnMat(`jersey:${jerseyHex}`, {
       color: jerseyHex,
-      roughness: 0.74,
-      metalness: 0.03,
+      bumpMap: fabricBump,
+      bumpScale: 0.006,
+      roughness: 0.78,
+      metalness: 0.02,
     });
     const accentMat = getSharedOrOwnMat(`accent:${accentHex}`, {
       color: accentHex,
-      roughness: 0.68,
-      metalness: 0.04,
+      roughness: 0.64,
+      metalness: 0.05,
     });
     const shortsMat = getSharedOrOwnMat(`shorts:${kit.shorts}`, {
       color: kit.shorts,
-      roughness: 0.78,
+      bumpMap: fabricBump,
+      bumpScale: 0.006,
+      roughness: 0.8,
       metalness: 0.02,
     });
     const sockHex = isGK ? kit.gkPrimary : kit.socks;
     const socksMat = getSharedOrOwnMat(`socks:${sockHex}`, {
       color: sockHex,
-      roughness: 0.76,
-      metalness: 0.02,
+      roughness: 0.82,
+      metalness: 0.01,
     });
     const skinMat = getSharedOrOwnMat(`skin:${player.appearance.skinTone}`, {
       color: player.appearance.skinTone,
-      roughness: 0.62,
+      roughness: 0.56,
       metalness: 0.02,
     });
     const hairMat = getSharedOrOwnMat(`hair:${player.appearance.hairColor}`, {
       color: player.appearance.hairColor,
-      roughness: 0.84,
-      metalness: 0.04,
+      roughness: 0.88,
+      metalness: 0.02,
     });
     const bootsMat = getSharedOrOwnMat(`boots:${player.appearance.bootsColor}`, {
       color: player.appearance.bootsColor,
-      roughness: 0.34,
-      metalness: 0.16,
+      roughness: 0.24,
+      metalness: 0.22,
     });
     const soleMat = getSharedOrOwnMat('sole:dark', {
-      color: 0x181c24,
-      roughness: 0.7,
+      color: 0x151922,
+      roughness: 0.68,
       metalness: 0.08,
     });
+
+    // Team & role silhouette differentiation (GKs wear full sleeves; away outfield uses V-collar + athletic undersleeve look on select positions)
+    const isAwayTeam = player.team === 'away';
+    const hasLongSleeves = isGK || (isAwayTeam && player.slotIndex % 3 === 0);
 
     // === HIERARCHICAL ARTICULATED HUMANOID RIG (~1.81m standing height) ===
 
@@ -598,12 +754,15 @@ export class PlayerVisual {
     torsoMesh.castShadow = true;
     this.torsoPivot.add(torsoMesh);
 
-    // Rounded athletic shoulders & collar
+    // Rounded athletic shoulders & team-differentiated collar (crew vs V-cut trim)
     const shouldersMesh = new THREE.Mesh(geos.shoulderBridge, jerseySolidMat);
     shouldersMesh.position.y = 0.455;
     this.torsoPivot.add(shouldersMesh);
 
-    const collarMesh = new THREE.Mesh(geos.collar, accentMat);
+    const collarMesh = new THREE.Mesh(
+      isAwayTeam ? geos.collarV : geos.collarCrew,
+      accentMat,
+    );
     collarMesh.position.y = 0.5;
     this.torsoPivot.add(collarMesh);
 
@@ -623,12 +782,12 @@ export class PlayerVisual {
     const hairGroup = buildHairGroup(geos, hairMat, player.appearance.hairStyle);
     this.headPivot.add(hairGroup);
 
-    // 4. Two-Segment Articulated Arms (Shoulder -> Sleeve + Upper Arm -> Elbow -> Forearm + Hand/Glove)
+    // 4. Two-Segment Articulated Arms (Shoulder -> Sleeve + Cuff + Upper Arm -> Elbow -> Forearm + Hand/Glove)
     const gloveMat = isGK
       ? getSharedOrOwnMat(`gkGlove:${kit.gkSecondary}`, {
           color: kit.gkSecondary,
-          roughness: 0.45,
-          metalness: 0.06,
+          roughness: 0.4,
+          metalness: 0.08,
         })
       : null;
 
@@ -642,7 +801,14 @@ export class PlayerVisual {
       sleeve.position.y = -0.075;
       shoulder.add(sleeve);
 
-      const upperArm = new THREE.Mesh(geos.upperArm, skinMat);
+      const cuff = new THREE.Mesh(geos.sleeveCuff, accentMat);
+      cuff.position.y = -0.168;
+      shoulder.add(cuff);
+
+      const upperArm = new THREE.Mesh(
+        geos.upperArm,
+        hasLongSleeves ? jerseySolidMat : skinMat,
+      );
       upperArm.position.y = -0.16;
       shoulder.add(upperArm);
 
@@ -650,7 +816,10 @@ export class PlayerVisual {
       elbow.position.y = -0.27;
       shoulder.add(elbow);
 
-      const forearm = new THREE.Mesh(geos.forearm, skinMat);
+      const forearm = new THREE.Mesh(
+        hasLongSleeves ? geos.longForearmSleeve : geos.forearm,
+        hasLongSleeves ? jerseySolidMat : skinMat,
+      );
       forearm.position.y = -0.115;
       elbow.add(forearm);
 
@@ -665,15 +834,15 @@ export class PlayerVisual {
       return { shoulder, elbow };
     };
 
-    const leftArm = buildArm(-0.235);
+    const leftArm = buildArm(-0.238);
     this.leftShoulderPivot = leftArm.shoulder;
     this.leftElbowPivot = leftArm.elbow;
 
-    const rightArm = buildArm(0.235);
+    const rightArm = buildArm(0.238);
     this.rightShoulderPivot = rightArm.shoulder;
     this.rightElbowPivot = rightArm.elbow;
 
-    // 5. Three-Segment Articulated Legs (Hip -> Short Leg + Thigh -> Knee -> Calf/Sock -> Ankle -> Boot)
+    // 5. Three-Segment Sculpted Legs (Hip -> Tailored Short + Quad Thigh -> Knee -> Sculpted Calf Sock -> Ankle -> Cleat)
     const buildLeg = (
       sideX: number,
     ): { hip: THREE.Group; knee: THREE.Group; ankle: THREE.Group } => {
@@ -694,7 +863,7 @@ export class PlayerVisual {
       hip.add(knee);
 
       const sockTrim = new THREE.Mesh(geos.sockTrim, accentMat);
-      sockTrim.position.y = -0.055;
+      sockTrim.position.y = -0.045;
       knee.add(sockTrim);
 
       const calfSock = new THREE.Mesh(geos.calfSock, socksMat);
@@ -708,6 +877,10 @@ export class PlayerVisual {
       const bootUpper = new THREE.Mesh(geos.bootUpper, bootsMat);
       bootUpper.position.set(0, -0.036, 0.042);
       ankle.add(bootUpper);
+
+      const bootAccent = new THREE.Mesh(geos.bootAccent, accentMat);
+      bootAccent.position.set(0, -0.032, 0.015);
+      ankle.add(bootAccent);
 
       const bootSole = new THREE.Mesh(geos.bootSole, soleMat);
       bootSole.position.set(0, -0.068, 0.04);
@@ -775,6 +948,32 @@ export class PlayerVisual {
     });
   }
 
+  private ensureNameplate(style: NameplateStyle): THREE.Sprite {
+    if (this.nameplateSprite && this.nameplateStyle === style) {
+      return this.nameplateSprite;
+    }
+    if (this.nameplateSprite) {
+      this.root.remove(this.nameplateSprite);
+      const oldMat = this.nameplateSprite.material as THREE.SpriteMaterial;
+      oldMat.map?.dispose();
+      oldMat.dispose();
+    }
+    const tex = createNameplateTexture(this.playerName, style);
+    const mat = new THREE.SpriteMaterial({
+      map: tex,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(style === 'scorer' ? 2.6 : 2.35, style === 'scorer' ? 0.64 : 0.58, 1);
+    sprite.renderOrder = 20;
+    this.root.add(sprite);
+    this.nameplateSprite = sprite;
+    this.nameplateStyle = style;
+    return sprite;
+  }
+
   public sync(
     player: PlayerState,
     elapsed: number,
@@ -782,6 +981,8 @@ export class PlayerVisual {
     allowShadowCast = true,
     dtOverride?: number,
     ball?: BallState,
+    showBroadcastTag = false,
+    isGoalScorer = false,
   ): void {
     const dt =
       dtOverride !== undefined
@@ -791,8 +992,27 @@ export class PlayerVisual {
           : 0.016;
     this.lastElapsed = elapsed;
 
+    // Snap visual heading only on teleport resets (e.g. kickoff), otherwise damp smoothly
+    const movedDistSq =
+      (player.position.x - this.prevWorldX) ** 2 +
+      (player.position.z - this.prevWorldZ) ** 2;
+    this.prevWorldX = player.position.x;
+    this.prevWorldZ = player.position.z;
+
+    if (movedDistSq > 16) {
+      this.visualFacingAngle = player.facingAngle;
+    } else {
+      const turnRate = player.actionState === 'kick' || player.actionState === 'tackle' ? 24 : 15;
+      this.visualFacingAngle = dampFacingAngle(
+        this.visualFacingAngle,
+        player.facingAngle,
+        turnRate,
+        dt,
+      );
+    }
+
     this.root.position.set(player.position.x, player.position.y, player.position.z);
-    this.bodyGroup.rotation.y = player.facingAngle;
+    this.bodyGroup.rotation.y = this.visualFacingAngle;
 
     if (allowShadowCast !== this.lastShadowCast) {
       this.lastShadowCast = allowShadowCast;
@@ -814,6 +1034,8 @@ export class PlayerVisual {
     s.animPhase = player.animPhase;
     s.shotCharge = shotCharge;
     s.ballSpeed = ball ? Math.hypot(ball.velocity.x, ball.velocity.y, ball.velocity.z) : 0;
+    s.ballLastTouchTeam = ball?.lastTouchTeam ?? null;
+    s.isGoalScorer = isGoalScorer;
     s.dt = dt;
     s.elapsed = elapsed;
 
@@ -844,12 +1066,25 @@ export class PlayerVisual {
     this.rightKneePivot.rotation.x = pose.rightKneeFlex;
     this.rightAnklePivot.rotation.x = pose.rightAnklePitch;
 
-    // Controlled ring, aim chevron & overhead indicator
+    // Clear TV visual hierarchy: controlled player > goal scorer highlight > active ball carrier
     const showCtrl = player.isControlled;
-    this.controlledRing.visible = showCtrl;
-    this.controlledMarker.visible = showCtrl;
-    this.controlledAimPivot.visible = showCtrl;
-    if (showCtrl) {
+    const ringMat = this.controlledRing.material as THREE.MeshBasicMaterial;
+    const markerMat = this.controlledMarker.material as THREE.MeshBasicMaterial;
+
+    if (isGoalScorer) {
+      this.controlledRing.visible = true;
+      this.controlledMarker.visible = true;
+      this.controlledAimPivot.visible = false;
+      const pulse = 1.12 + Math.sin(elapsed * 6.5) * 0.1;
+      this.controlledRing.scale.setScalar(pulse);
+      ringMat.color.setHex(0xfacc15);
+      ringMat.opacity = 0.92;
+      this.controlledMarker.position.y = 2.34 + Math.sin(elapsed * 5.5) * 0.06;
+      markerMat.color.setHex(0xfde047);
+    } else if (showCtrl) {
+      this.controlledRing.visible = true;
+      this.controlledMarker.visible = true;
+      this.controlledAimPivot.visible = true;
       const indicatorHex =
         shotCharge > 0.72
           ? 0xf43f5e
@@ -858,20 +1093,55 @@ export class PlayerVisual {
             : player.hasBall
               ? 0xffffff
               : 0x38bdf8;
-      this.controlledMarker.position.y = 2.08 + Math.sin(elapsed * 4.5) * 0.06;
-      (this.controlledRing.material as THREE.MeshBasicMaterial).color.setHex(indicatorHex);
-      (this.controlledMarker.material as THREE.MeshBasicMaterial).color.setHex(
+      this.controlledRing.scale.setScalar(player.hasBall ? 1.04 : 1.0);
+      ringMat.color.setHex(indicatorHex);
+      ringMat.opacity = 0.92;
+      this.controlledMarker.position.y = 2.26 + Math.sin(elapsed * 4.5) * 0.05;
+      markerMat.color.setHex(
         shotCharge > 0.72 ? 0xf43f5e : shotCharge > 0.05 ? 0xfacc15 : 0x2dd4bf,
       );
 
       this.controlledAimPivot.rotation.y = player.facingAngle;
-      this.controlledAimArrow.position.z = 0.76 + shotCharge * 0.52;
+      this.controlledAimArrow.position.z = 0.78 + shotCharge * 0.52;
       this.controlledAimArrow.scale.set(1 + shotCharge * 0.3, 1, 1 + shotCharge * 0.85);
       (this.controlledAimArrow.material as THREE.MeshBasicMaterial).color.setHex(indicatorHex);
+    } else if (player.hasBall) {
+      // Subtle translucent ground ring on non-controlled ball carrier for instant TV readability
+      this.controlledRing.visible = true;
+      this.controlledMarker.visible = false;
+      this.controlledAimPivot.visible = false;
+      this.controlledRing.scale.setScalar(0.95);
+      ringMat.color.setHex(0xf8fafc);
+      ringMat.opacity = 0.42;
+    } else {
+      this.controlledRing.visible = false;
+      this.controlledMarker.visible = false;
+      this.controlledAimPivot.visible = false;
+    }
+
+    // Broadcast TV nameplate floating cleanly over goal scorer, controlled player, or active ball-carrier
+    const wantTag = isGoalScorer || showBroadcastTag || showCtrl;
+    if (wantTag) {
+      const style: NameplateStyle = isGoalScorer
+        ? 'scorer'
+        : showCtrl
+          ? 'controlled'
+          : 'carrier';
+      const sprite = this.ensureNameplate(style);
+      sprite.visible = true;
+      sprite.position.set(0, isGoalScorer ? 2.84 : showCtrl ? 2.72 : 2.34, 0);
+    } else if (this.nameplateSprite) {
+      this.nameplateSprite.visible = false;
     }
   }
 
   public dispose(): void {
+    if (this.nameplateSprite) {
+      const mat = this.nameplateSprite.material as THREE.SpriteMaterial;
+      mat.map?.dispose();
+      mat.dispose();
+      this.nameplateSprite = null;
+    }
     for (const tex of this.disposableTextures) {
       tex.dispose();
     }

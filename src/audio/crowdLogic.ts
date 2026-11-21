@@ -54,3 +54,67 @@ export function computeCrowdGainLevels(intensity: number): CrowdGainLevels {
     chatterFreqHz: 580 + clamped * 440,
   };
 }
+
+export type SoundChannelId =
+  | 'kick'
+  | 'tackle'
+  | 'whistle'
+  | 'postHit'
+  | 'netSwish'
+  | 'applause'
+  | 'ooh'
+  | 'boo'
+  | 'goalCheer';
+
+export const SOUND_COOLDOWNS_MS: Record<SoundChannelId, number> = {
+  kick: 55,
+  tackle: 180,
+  whistle: 240,
+  postHit: 220,
+  netSwish: 300,
+  applause: 1500,
+  ooh: 1200,
+  boo: 1600,
+  goalCheer: 2600,
+};
+
+/**
+ * Pure cooldown guard preventing simultaneous duplicate audio triggers.
+ * Updates `lastTriggeredMs[channel]` when allowed.
+ */
+export function canTriggerSound(
+  lastTriggeredMs: Partial<Record<SoundChannelId, number>>,
+  channel: SoundChannelId,
+  nowMs: number,
+  cooldownOverrideMs?: number,
+): boolean {
+  const minGap = cooldownOverrideMs ?? SOUND_COOLDOWNS_MS[channel];
+  const prev = lastTriggeredMs[channel];
+  if (prev !== undefined && nowMs - prev < minGap) {
+    return false;
+  }
+  lastTriggeredMs[channel] = nowMs;
+  return true;
+}
+
+/**
+ * Blends live baseline stadium ambience with a decaying post-action boost
+ * (applause, dangerous shot, or goal roar) for a smooth return to normal crowd levels.
+ */
+export function computeEffectiveCrowdIntensity(
+  baseIntensity: number,
+  boostPeak: number,
+  elapsedSinceBoostSec: number,
+  decayDurationSec: number,
+): number {
+  const clampedBase = Math.min(1, Math.max(0, baseIntensity));
+  if (clampedBase <= 0.001) return 0;
+  if (boostPeak <= 0 || decayDurationSec <= 0 || elapsedSinceBoostSec >= decayDurationSec) {
+    return clampedBase;
+  }
+  const t = Math.max(0, Math.min(1, elapsedSinceBoostSec / decayDurationSec));
+  // Smooth ease-out decay back to normal crowd level
+  const remaining = (1 - t) * (1 - t);
+  return Math.min(1, clampedBase + boostPeak * remaining);
+}
+

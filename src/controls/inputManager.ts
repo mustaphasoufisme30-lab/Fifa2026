@@ -5,6 +5,7 @@ export class InputManager {
   private touchMoveX = 0;
   private touchMoveZ = 0;
   private touchSprint = false;
+  private touchPress = false;
   private touchShootHeld = false;
 
   private pendingPass = false;
@@ -51,6 +52,7 @@ export class InputManager {
     this.touchMoveX = 0;
     this.touchMoveZ = 0;
     this.touchSprint = false;
+    this.touchPress = false;
     this.touchShootHeld = false;
     this.pendingPass = false;
     this.pendingLob = false;
@@ -67,6 +69,10 @@ export class InputManager {
 
   public setTouchSprint(active: boolean): void {
     this.touchSprint = active;
+  }
+
+  public setTouchPress(active: boolean): void {
+    this.touchPress = active;
   }
 
   public setTouchShootHeld(held: boolean): void {
@@ -113,10 +119,14 @@ export class InputManager {
       kz *= inv;
     }
 
-    const moveX = Math.abs(this.touchMoveX) > 0.05 ? this.touchMoveX : kx;
-    const moveZ = Math.abs(this.touchMoveZ) > 0.05 ? this.touchMoveZ : kz;
+    // Use radial analog joystick magnitude so shallow 360-degree angles never snap to axes
+    const touchActive =
+      this.touchMoveX * this.touchMoveX + this.touchMoveZ * this.touchMoveZ > 0.0004;
+    const moveX = touchActive ? this.touchMoveX : kx;
+    const moveZ = touchActive ? this.touchMoveZ : kz;
     const sprint =
       this.touchSprint ||
+      this.touchPress ||
       this.keys.has('ShiftLeft') ||
       this.keys.has('ShiftRight');
 

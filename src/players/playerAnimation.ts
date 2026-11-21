@@ -7,6 +7,7 @@ export type PlayerAnimClip =
   | 'sprint'
   | 'turn'
   | 'stop'
+  | 'receive'
   | 'kick'
   | 'pass'
   | 'shoot'
@@ -38,11 +39,18 @@ export interface ArticulatedPose {
   rightAnklePitch: number;
 }
 
+export type PlayerReactionKind = 'none' | 'intercept' | 'pass_follow' | 'power_shot';
+
 export interface PlayerAnimMemory {
   prevSpeed: number;
   prevFacingAngle: number;
+  prevHasBall: boolean;
+  prevBallLastTouchTeam: PlayerState['team'] | null;
   hasPrev: boolean;
   stopTimer: number;
+  receiveTimer: number;
+  reactionKind: PlayerReactionKind;
+  reactionTimer: number;
   turnIntensity: number;
   turnSign: number;
   kickVariant: 'kick' | 'pass' | 'shoot';
@@ -63,6 +71,8 @@ export interface PlayerAnimSignals {
   animPhase: number;
   shotCharge: number;
   ballSpeed: number;
+  ballLastTouchTeam?: PlayerState['team'] | null;
+  isGoalScorer?: boolean;
   dt: number;
   elapsed: number;
 }
@@ -97,8 +107,13 @@ export function createAnimMemory(): PlayerAnimMemory {
   return {
     prevSpeed: 0,
     prevFacingAngle: 0,
+    prevHasBall: false,
+    prevBallLastTouchTeam: null,
     hasPrev: false,
     stopTimer: 0,
+    receiveTimer: 0,
+    reactionKind: 'none',
+    reactionTimer: 0,
     turnIntensity: 0,
     turnSign: 0,
     kickVariant: 'kick',
@@ -113,6 +128,22 @@ export function shortestAngleDelta(from: number, to: number): number {
   if (diff > Math.PI) diff -= Math.PI * 2;
   if (diff < -Math.PI) diff += Math.PI * 2;
   return diff;
+}
+
+/**
+ * Smoothly rotates a visual heading toward a target angle along the shortest arc.
+ * Prevents abrupt rotational snaps during sudden direction changes or network snapshots.
+ */
+export function dampFacingAngle(
+  current: number,
+  target: number,
+  lambda: number,
+  dt: number,
+): number {
+  if (dt <= 0) return target;
+  const delta = shortestAngleDelta(current, target);
+  const factor = 1 - Math.exp(-lambda * dt);
+  return current + delta * factor;
 }
 
 function clamp(v: number, min: number, max: number): number {
@@ -165,6 +196,29 @@ export function resolvePlayerAnimClip(
     memory.stopTimer = Math.max(0, memory.stopTimer - dt);
   }
 
+  // Detect fresh ball reception & interception/recovery from opponent
+  if (memory.hasPrev && !memory.prevHasBall && signals.hasBall) {
+    memory.receiveTimer = 0.28;
+    const wonFromOpponent =
+      memory.prevBallLastTouchTeam !== null && memory.prevBallLastTouchTeam !== signals.team;
+    if (wonFromOpponent) {
+      memory.reactionKind = 'intercept';
+      memory.reactionTimer = 0.34;
+    }
+  } else if (!signals.hasBall) {
+    memory.receiveTimer = 0;
+  } else if (memory.receiveTimer > 0) {
+    memory.receiveTimer = Math.max(0, memory.receiveTimer - dt);
+  }
+
+  // Decay active procedural reaction overlay
+  if (memory.reactionTimer > 0) {
+    memory.reactionTimer = Math.max(0, memory.reactionTimer - dt);
+    if (memory.reactionTimer === 0) {
+      memory.reactionKind = 'none';
+    }
+  }
+
   // Advance smooth local stride phase when moving (works consistently for both local & online players)
   if (signals.speed > 0.25) {
     const freq = signals.speed > 6.2 ? 2.15 : signals.speed > 2.5 ? 1.85 : 1.55;
@@ -173,6 +227,8 @@ export function resolvePlayerAnimClip(
 
   memory.prevSpeed = signals.speed;
   memory.prevFacingAngle = signals.facingAngle;
+  memory.prevHasBall = signals.hasBall;
+  memory.prevBallLastTouchTeam = signals.ballLastTouchTeam ?? null;
   memory.hasPrev = true;
 
   // 1. High-priority action states directly from MatchEngine / network snapshot
@@ -192,8 +248,12 @@ export function resolvePlayerAnimClip(
     if (!memory.wasKicking) {
       if (memory.lastShotCharge > 0.22 || signals.ballSpeed > 19.0) {
         memory.kickVariant = 'shoot';
+        memory.reactionKind = 'power_shot';
+        memory.reactionTimer = 0.36;
       } else if (signals.ballSpeed > 7.0 && signals.ballSpeed <= 19.0) {
         memory.kickVariant = 'pass';
+        memory.reactionKind = 'pass_follow';
+        memory.reactionTimer = 0.26;
       } else {
         memory.kickVariant = 'kick';
       }
@@ -203,7 +263,12 @@ export function resolvePlayerAnimClip(
   }
   memory.wasKicking = false;
 
-  // 2. Locomotion & transitional states driven by velocity & rotation
+  // 2. Ball reception / first-touch cushion (only when not sprinting full speed)
+  if (memory.receiveTimer > 0.02 && signals.hasBall && signals.speed < 6.4) {
+    return 'receive';
+  }
+
+  // 3. Locomotion & transitional states driven by velocity & rotation
   if (signals.speed < 0.32) {
     return memory.stopTimer > 0.02 ? 'stop' : 'idle';
   }
@@ -396,6 +461,34 @@ export function evaluateTargetPose(
       break;
     }
 
+    case 'receive': {
+      // First-touch ball control / inside-foot cushioning trap
+      const progress = clamp(1 - memory.receiveTimer / 0.28, 0, 1);
+      const cushion = Math.sin(progress * Math.PI);
+      out.pelvisY = -0.055 - cushion * 0.035;
+      out.pelvisPitch = 0.12;
+      out.pelvisRoll = -0.08 * cushion;
+      out.torsoPitch = 0.16;
+      out.torsoYaw = -0.18 * cushion;
+      out.headPitch = 0.24 * cushion;
+
+      // Planted left support leg, right foot lifted & opened to trap the ball softly
+      out.leftHipPitch = -0.14;
+      out.leftKneeFlex = 0.36;
+      out.rightHipPitch = -0.46 * cushion - 0.06;
+      out.rightHipRoll = -0.22 * cushion;
+      out.rightKneeFlex = 0.28 + 0.34 * cushion;
+      out.rightAnklePitch = -0.18 * cushion;
+
+      out.leftShoulderPitch = -0.18 * cushion;
+      out.leftShoulderRoll = 0.34 + 0.14 * cushion;
+      out.leftElbowFlex = -0.52;
+      out.rightShoulderPitch = 0.22 * cushion;
+      out.rightShoulderRoll = -0.34 - 0.14 * cushion;
+      out.rightElbowFlex = -0.48;
+      break;
+    }
+
     case 'pass': {
       // Crisp side-foot pass follow-through
       const t = clamp(1 - signals.actionTimer / 0.25, 0, 1);
@@ -522,25 +615,82 @@ export function evaluateTargetPose(
       const hopPhase = signals.elapsed * 7.2 + signals.slotIndex * 0.9;
       const hop = Math.abs(Math.sin(hopPhase));
       const pump = Math.sin(hopPhase * 1.2);
-      out.pelvisY = hop * 0.24;
-      out.pelvisPitch = -0.08;
-      out.pelvisRoll = Math.sin(signals.elapsed * 4.5 + signals.slotIndex) * 0.1;
-      out.torsoPitch = -0.1;
-      out.torsoYaw = Math.sin(signals.elapsed * 5.2 + signals.slotIndex) * 0.22;
+      const isScorer = Boolean(signals.isGoalScorer);
+      out.pelvisY = hop * (isScorer ? 0.3 : 0.24);
+      out.pelvisPitch = isScorer ? -0.14 : -0.08;
+      out.pelvisRoll = Math.sin(signals.elapsed * 4.5 + signals.slotIndex) * (isScorer ? 0.14 : 0.1);
+      out.torsoPitch = isScorer ? -0.15 : -0.1;
+      out.torsoYaw = Math.sin(signals.elapsed * 5.2 + signals.slotIndex) * (isScorer ? 0.28 : 0.22);
 
       out.leftHipPitch = -hop * 0.45;
       out.rightHipPitch = -hop * 0.32;
       out.leftKneeFlex = 0.25 + hop * 0.72;
       out.rightKneeFlex = 0.25 + hop * 0.58;
 
-      out.leftShoulderPitch = -2.65 + pump * 0.25;
-      out.rightShoulderPitch = -2.65 - pump * 0.25;
-      out.leftShoulderRoll = 0.48;
-      out.rightShoulderRoll = -0.48;
-      out.leftElbowFlex = -0.35 - hop * 0.25;
-      out.rightElbowFlex = -0.35 - hop * 0.25;
+      if (isScorer) {
+        // Signature wide-arms airplane/victory celebration for the goal scorer
+        out.leftShoulderPitch = -1.65 + pump * 0.35;
+        out.rightShoulderPitch = -1.65 - pump * 0.35;
+        out.leftShoulderRoll = 1.05;
+        out.rightShoulderRoll = -1.05;
+        out.leftElbowFlex = -0.18;
+        out.rightElbowFlex = -0.18;
+      } else {
+        out.leftShoulderPitch = -2.65 + pump * 0.25;
+        out.rightShoulderPitch = -2.65 - pump * 0.25;
+        out.leftShoulderRoll = 0.48;
+        out.rightShoulderRoll = -0.48;
+        out.leftElbowFlex = -0.35 - hop * 0.25;
+        out.rightElbowFlex = -0.35 - hop * 0.25;
+      }
       break;
     }
+  }
+
+  // Lightweight procedural post-action reaction overlay (interception, pass follow-through, power shot)
+  if (
+    memory.reactionTimer > 0 &&
+    clip !== 'dive' &&
+    clip !== 'tackle' &&
+    clip !== 'celebration'
+  ) {
+    if (memory.reactionKind === 'intercept') {
+      const w = Math.sin(clamp(memory.reactionTimer / 0.34, 0, 1) * Math.PI);
+      out.torsoPitch -= 0.08 * w;
+      out.leftShoulderRoll += 0.26 * w;
+      out.rightShoulderRoll -= 0.26 * w;
+      out.leftElbowFlex -= 0.24 * w;
+      out.rightElbowFlex -= 0.24 * w;
+    } else if (memory.reactionKind === 'pass_follow' && clip !== 'pass') {
+      const w = clamp(memory.reactionTimer / 0.26, 0, 1);
+      out.torsoYaw -= 0.14 * w;
+      out.headPitch -= 0.06 * w;
+      out.leftShoulderRoll += 0.14 * w;
+    } else if (memory.reactionKind === 'power_shot' && clip !== 'shoot') {
+      const w = clamp(memory.reactionTimer / 0.36, 0, 1);
+      out.torsoYaw -= 0.24 * w;
+      out.pelvisRoll -= 0.1 * w;
+      out.leftShoulderPitch -= 0.28 * w;
+      out.rightShoulderPitch += 0.22 * w;
+    }
+  }
+
+  // Shot-charge wind-up anticipation: visibly cock back the striking leg right before release
+  if (
+    signals.shotCharge > 0.08 &&
+    (clip === 'idle' ||
+      clip === 'walk' ||
+      clip === 'run' ||
+      clip === 'sprint' ||
+      clip === 'receive')
+  ) {
+    const c = clamp(signals.shotCharge, 0, 1);
+    out.torsoYaw += 0.28 * c;
+    out.pelvisRoll += 0.1 * c;
+    out.rightHipPitch = out.rightHipPitch * (1 - 0.55 * c) + 0.58 * c;
+    out.rightKneeFlex = Math.max(out.rightKneeFlex, 0.32 + 0.65 * c);
+    out.leftShoulderRoll += 0.24 * c;
+    out.rightShoulderPitch -= 0.32 * c;
   }
 }
 
@@ -560,7 +710,7 @@ export function blendArticulatedPose(
     clip === 'shoot' ||
     clip === 'tackle' ||
     clip === 'dive';
-  const lambda = isSnapAction ? 20 : clip === 'stop' ? 16 : 13;
+  const lambda = isSnapAction ? 20 : clip === 'stop' || clip === 'receive' ? 16 : 13;
 
   current.pelvisY = dampValue(current.pelvisY, target.pelvisY, lambda, dt);
   current.pelvisPitch = dampValue(current.pelvisPitch, target.pelvisPitch, lambda, dt);

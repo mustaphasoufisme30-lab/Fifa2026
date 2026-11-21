@@ -1,8 +1,9 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { soundEngine } from '../audio/soundEngine';
 import { BallVisual } from '../ball/ballMesh';
-import { CameraController } from '../camera/cameraController';
+import { CameraController, CameraDynamicContext } from '../camera/cameraController';
 import { buildStadium, StadiumResources } from '../core/stadiumMesh';
 import { CameraMode, GameSettings, GameShellState, InputSnapshot, TeamSide } from '../core/types';
 import { InputManager } from '../controls/inputManager';
@@ -88,8 +89,20 @@ export function PitchScene({
   const playerShadowBatchRef = useRef<PlayerShadowBatch | null>(null);
   const ballVisualRef = useRef<BallVisual | null>(null);
   const cameraCtrlRef = useRef<CameraController | null>(null);
+  const cameraContextRef = useRef<CameraDynamicContext>({
+    ballVelocity: null,
+    scorerPos: null,
+    isReplaying: false,
+  });
   const keyLightRef = useRef<THREE.DirectionalLight | null>(null);
   const isSoftwareGlRef = useRef(false);
+  const crowdObserverRef = useRef({
+    passes: 0,
+    shots: 0,
+    saves: 0,
+    pulse: 0.25,
+    initialized: false,
+  });
 
   // Rebuild player 3D visuals whenever teams/kits change
   const rebuildPlayerVisuals = () => {
@@ -294,25 +307,90 @@ export function PitchScene({
         // Sync 3D visuals with live state or slow-motion goal replay proxy
         const visual = engine.getVisualState();
         const isGoalMoment = engine.phase === 'goal' || engine.isReplaying;
-        stadiumRef.current?.update(elapsed, isGoalMoment);
+
+        // Read-only match event observer for stadium applause, dangerous-shot reactions & crowd energy (0 allocations)
+        const obs = crowdObserverRef.current;
+        const totalPasses = engine.stats.homePasses + engine.stats.awayPasses;
+        const totalShots = engine.stats.homeShots + engine.stats.awayShots;
+        const totalSaves = engine.stats.homeSaves + engine.stats.awaySaves;
+        if (
+          !obs.initialized ||
+          totalPasses < obs.passes ||
+          totalShots < obs.shots ||
+          totalSaves < obs.saves
+        ) {
+          obs.passes = totalPasses;
+          obs.shots = totalShots;
+          obs.saves = totalSaves;
+          obs.initialized = true;
+        } else if (shellStateRef.current === 'playing' && !engine.isReplaying) {
+          const absBallX = Math.abs(visual.ball.position.x);
+          const ballSpeed = Math.hypot(visual.ball.velocity.x, visual.ball.velocity.z);
+          if (totalShots > obs.shots) {
+            obs.shots = totalShots;
+            if (ballSpeed > 18 || absBallX > 25) {
+              soundEngine.playCrowdReaction('ooh');
+              obs.pulse = Math.max(obs.pulse, 0.9);
+            }
+          }
+          if (totalSaves > obs.saves) {
+            obs.saves = totalSaves;
+            soundEngine.playCrowdReaction('applause');
+            obs.pulse = Math.max(obs.pulse, 0.85);
+          }
+          if (totalPasses > obs.passes) {
+            obs.passes = totalPasses;
+            if (absBallX > 16) {
+              soundEngine.playCrowdReaction('applause');
+              obs.pulse = Math.max(obs.pulse, 0.72);
+            }
+          }
+        }
+        const baseCrowdEnergy = isGoalMoment
+          ? 1.0
+          : shellStateRef.current === 'playing'
+            ? 0.28 + Math.min(0.45, Math.abs(visual.ball.position.x) / 72)
+            : 0.24;
+        obs.pulse = Math.max(baseCrowdEnergy, obs.pulse - dt * 0.24);
+        stadiumRef.current?.update(elapsed, isGoalMoment, obs.pulse);
 
         const animDt = engine.isReplaying ? dt * 0.55 : dt;
-        ballVisualRef.current?.sync(visual.ball, animDt);
+        const ballCarrier = visual.ball.ownerId
+          ? (visual.players.find((p) => p.id === visual.ball.ownerId) ?? null)
+          : null;
+        const isLiveGoalCelebration = engine.phase === 'goal' && !engine.isReplaying;
+        ballVisualRef.current?.sync(visual.ball, animDt, ballCarrier, isLiveGoalCelebration);
         const activeSide = onlineModeRef.current ? localSideRef.current : 'home';
         const shotCharge = engine.getShotCharge(activeSide);
         const quality = settingsRef.current.quality;
         const allowShadowsGlobal = !isSoftwareGl && quality !== 'low';
         const shadowDistLimitSq = quality === 'high' ? 99999 : 34 * 34;
+        const isPlayingView = shellStateRef.current === 'playing';
+
+        // Identify the goal scorer read-only during goal broadcast presentation (zero gameplay modification)
+        let goalScorerPlayer = null;
+        if (isGoalMoment) {
+          const scorerName = engine.stats.lastScorerName ?? visual.ball.lastTouchPlayerName;
+          const scorerTeam = engine.stats.lastScorerTeam ?? visual.ball.lastTouchTeam;
+          if (scorerName) {
+            goalScorerPlayer =
+              visual.players.find(
+                (p) => p.name === scorerName && (!scorerTeam || p.team === scorerTeam),
+              ) ?? null;
+          }
+        }
 
         for (const p of visual.players) {
           const pv = playerVisualsRef.current.get(p.id);
           if (!pv) continue;
           const isLocalControlled = p.isControlled && p.team === activeSide;
+          const isActiveBallCarrier = ballCarrier !== null && ballCarrier.id === p.id;
+          const isGoalScorer = goalScorerPlayer !== null && goalScorerPlayer.id === p.id;
           const dx = p.position.x - visual.ball.position.x;
           const dz = p.position.z - visual.ball.position.z;
           const allowShadow =
             allowShadowsGlobal &&
-            (isLocalControlled || dx * dx + dz * dz <= shadowDistLimitSq);
+            (isLocalControlled || isGoalScorer || dx * dx + dz * dz <= shadowDistLimitSq);
           pv.sync(
             p,
             elapsed,
@@ -320,6 +398,8 @@ export function PitchScene({
             allowShadow,
             animDt,
             visual.ball,
+            isPlayingView && (isLocalControlled || isActiveBallCarrier || isGoalScorer),
+            isGoalScorer,
           );
         }
         playerShadowBatchRef.current?.sync(visual.players);
@@ -342,6 +422,11 @@ export function PitchScene({
           keyLight.target.updateMatrixWorld();
         }
 
+        const camCtx = cameraContextRef.current;
+        camCtx.ballVelocity = visual.ball.velocity;
+        camCtx.scorerPos = goalScorerPlayer ? goalScorerPlayer.position : null;
+        camCtx.isReplaying = engine.isReplaying;
+
         cameraCtrl.update(
           camera,
           shellStateRef.current,
@@ -350,6 +435,7 @@ export function PitchScene({
           controlled ? controlled.position : null,
           isGoalMoment,
           dt,
+          camCtx,
         );
       }
 

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BALL_RADIUS } from '../core/constants';
-import { BallState } from '../core/types';
+import { BallState, PlayerState } from '../core/types';
 
 // Exact 12 vertices of a unit icosahedron (centers of the 12 classic black pentagon panels)
 const PHI = (1 + Math.sqrt(5)) / 2;
@@ -165,7 +165,19 @@ interface TrailNode {
   active: boolean;
 }
 
+interface BurstShard {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  vx: number;
+  vy: number;
+  vz: number;
+  age: number;
+  maxAge: number;
+  active: boolean;
+}
+
 const TRAIL_POOL_SIZE = 8;
+const BURST_POOL_SIZE = 4;
 
 // Pre-allocated scratch math helpers (zero GC allocations inside requestAnimationFrame)
 const _rollAxis = new THREE.Vector3();
@@ -182,11 +194,24 @@ export class BallVisual {
   private readonly shadowTex: THREE.CanvasTexture;
   private readonly trailGeo: THREE.SphereGeometry;
   private readonly trailNodes: TrailNode[] = [];
+  private readonly burstGeo: THREE.BoxGeometry;
+  private readonly burstShards: BurstShard[] = [];
+  private readonly kickRingMesh: THREE.Mesh;
+  private readonly kickRingMat: THREE.MeshBasicMaterial;
+  private kickRingAge = 1;
+  private kickRingMaxAge = 0.22;
+  private kickRingMaxScale = 2.9;
+  private kickPulseAge = 1;
+  private kickPulseStrength = 0;
+  private wasGoalMoment = false;
   private trailCursor = 0;
   private trailSpawnAccum = 0;
   private prevX = 0;
   private prevZ = 0;
   private hasPrevPos = false;
+  private prevOwnerId: string | null = null;
+  private dribbleOffsetX = 0;
+  private dribbleOffsetZ = 0;
 
   constructor(maxAnisotropy: number) {
     this.group = new THREE.Group();
@@ -225,6 +250,45 @@ export class BallVisual {
     this.shadowDisc.position.y = 0.018;
     this.group.add(this.shadowDisc);
 
+    // Pre-allocated zero-GC contact ring shown briefly when a pass or shot is struck
+    const kickRingGeo = new THREE.RingGeometry(BALL_RADIUS * 0.7, BALL_RADIUS * 1.18, 20);
+    this.kickRingMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+    });
+    this.kickRingMesh = new THREE.Mesh(kickRingGeo, this.kickRingMat);
+    this.kickRingMesh.rotation.x = -Math.PI / 2;
+    this.kickRingMesh.position.y = 0.022;
+    this.kickRingMesh.visible = false;
+    this.group.add(this.kickRingMesh);
+
+    // Pre-allocated zero-GC directional departure micro-sparks for passes & shots (4 tiny reused meshes)
+    this.burstGeo = new THREE.BoxGeometry(0.055, 0.035, 0.16);
+    for (let i = 0; i < BURST_POOL_SIZE; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(this.burstGeo, mat);
+      mesh.visible = false;
+      this.group.add(mesh);
+      this.burstShards.push({
+        mesh,
+        mat,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        age: 1,
+        maxAge: 0.18,
+        active: false,
+      });
+    }
+
     // Pre-allocated zero-GC trail pool for power shots (> 18 m/s)
     this.trailGeo = new THREE.SphereGeometry(BALL_RADIUS * 0.65, 8, 6);
     for (let i = 0; i < TRAIL_POOL_SIZE; i++) {
@@ -241,18 +305,79 @@ export class BallVisual {
     }
   }
 
-  public sync(ball: BallState, dt: number): void {
-    this.sphere.position.set(ball.position.x, ball.position.y, ball.position.z);
+  private spawnKickBurst(
+    x: number,
+    y: number,
+    z: number,
+    dirX: number,
+    dirZ: number,
+    isPowerShot: boolean,
+    isShot: boolean,
+  ): void {
+    const baseAngle = Math.atan2(dirX, dirZ);
+    const count = isPowerShot ? 4 : isShot ? 3 : 2;
+    const hex = isPowerShot ? 0xfef08a : isShot ? 0xf8fafc : 0xe2e8f0;
+    const speedBase = isPowerShot ? 4.8 : isShot ? 3.5 : 2.2;
+    for (let i = 0; i < count; i++) {
+      const shard = this.burstShards[i];
+      const spread = ((i / Math.max(1, count - 1)) - 0.5) * 1.15;
+      const angle = baseAngle + spread;
+      shard.active = true;
+      shard.age = 0;
+      shard.maxAge = isPowerShot ? 0.22 : 0.16;
+      shard.vx = Math.sin(angle) * speedBase;
+      shard.vy = isPowerShot ? 1.5 + i * 0.22 : 0.8 + i * 0.15;
+      shard.vz = Math.cos(angle) * speedBase;
+      shard.mesh.visible = true;
+      shard.mesh.position.set(x, Math.max(0.08, y), z);
+      shard.mesh.rotation.set(0, angle, 0);
+      shard.mesh.scale.set(1, 1, isPowerShot ? 1.45 : 0.95);
+      shard.mat.color.setHex(hex);
+      shard.mat.opacity = isPowerShot ? 0.62 : isShot ? 0.48 : 0.34;
+    }
+  }
+
+  public sync(
+    ball: BallState,
+    dt: number,
+    owner?: PlayerState | null,
+    isGoalMoment = false,
+  ): void {
+    // Purely visual foot-cadence dribble coupling while possessed (never alters authoritative physics)
+    let targetOffX = 0;
+    let targetOffZ = 0;
+    if (owner && ball.ownerId === owner.id) {
+      const ownerSpeed = Math.hypot(owner.velocity.x, owner.velocity.z);
+      if (ownerSpeed > 0.45) {
+        const fwdX = Math.sin(owner.facingAngle);
+        const fwdZ = Math.cos(owner.facingAngle);
+        const rightX = Math.cos(owner.facingAngle);
+        const rightZ = -Math.sin(owner.facingAngle);
+        const speedNorm = Math.min(1, ownerSpeed / 7.2);
+        const push = (0.04 + Math.max(0, Math.sin(owner.animPhase * 1.1)) * 0.13) * speedNorm;
+        const sway = Math.cos(owner.animPhase * 1.1) * 0.075 * speedNorm;
+        targetOffX = fwdX * push + rightX * sway;
+        targetOffZ = fwdZ * push + rightZ * sway;
+      }
+    }
+    const dampLambda = ball.ownerId !== null ? 16 : 28;
+    const factor = dt > 0 ? 1 - Math.exp(-dampLambda * dt) : 1;
+    this.dribbleOffsetX += (targetOffX - this.dribbleOffsetX) * factor;
+    this.dribbleOffsetZ += (targetOffZ - this.dribbleOffsetZ) * factor;
+
+    const renderX = ball.position.x + this.dribbleOffsetX;
+    const renderZ = ball.position.z + this.dribbleOffsetZ;
+    this.sphere.position.set(renderX, ball.position.y, renderZ);
 
     // Compute real rolling displacement (handles both free physics flight AND dribbler foot-roll)
     let moveDx = ball.velocity.x * dt;
     let moveDz = ball.velocity.z * dt;
     if (this.hasPrevPos && ball.ownerId !== null) {
-      moveDx = ball.position.x - this.prevX;
-      moveDz = ball.position.z - this.prevZ;
+      moveDx = renderX - this.prevX;
+      moveDz = renderZ - this.prevZ;
     }
-    this.prevX = ball.position.x;
-    this.prevZ = ball.position.z;
+    this.prevX = renderX;
+    this.prevZ = renderZ;
     this.hasPrevPos = true;
 
     const travelDist = Math.hypot(moveDx, moveDz);
@@ -270,8 +395,92 @@ export class BallVisual {
       this.sphere.quaternion.premultiply(_deltaQuat);
     }
 
+    // Trigger subtle strictly-visual reactions on pass/shot strike & goal broadcast moment
+    const totalSpeed = Math.hypot(ball.velocity.x, ball.velocity.y, ball.velocity.z);
+    if (this.prevOwnerId !== null && ball.ownerId === null && totalSpeed > 8.5) {
+      const isPowerShot = totalSpeed > 23.5;
+      const isShot = totalSpeed > 18.5;
+      this.kickRingAge = 0;
+      this.kickRingMaxAge = isPowerShot ? 0.26 : isShot ? 0.22 : 0.18;
+      this.kickRingMaxScale = isPowerShot ? 3.5 : isShot ? 2.9 : 2.15;
+      this.kickRingMesh.visible = true;
+      this.kickRingMesh.position.set(ball.position.x, 0.022, ball.position.z);
+      this.kickRingMat.color.setHex(isPowerShot ? 0xfef08a : isShot ? 0xf8fafc : 0xffffff);
+
+      // Brief strictly-visual impact pulse on the sphere scale (zero physics impact)
+      this.kickPulseAge = 0;
+      this.kickPulseStrength = isPowerShot ? 0.15 : isShot ? 0.1 : 0.05;
+
+      const horiz = Math.hypot(ball.velocity.x, ball.velocity.z);
+      if (horiz > 0.1) {
+        this.spawnKickBurst(
+          ball.position.x,
+          ball.position.y,
+          ball.position.z,
+          ball.velocity.x / horiz,
+          ball.velocity.z / horiz,
+          isPowerShot,
+          isShot,
+        );
+      }
+    }
+    this.prevOwnerId = ball.ownerId;
+
+    // One-shot broadcast goal highlight ring when a goal is scored (strictly visual)
+    if (isGoalMoment && !this.wasGoalMoment) {
+      this.kickRingAge = 0;
+      this.kickRingMaxAge = 0.42;
+      this.kickRingMaxScale = 5.2;
+      this.kickRingMesh.visible = true;
+      this.kickRingMesh.position.set(ball.position.x, 0.026, ball.position.z);
+      this.kickRingMat.color.setHex(0xfde047);
+    }
+    this.wasGoalMoment = isGoalMoment;
+
+    // Apply brief visual strike pulse strictly to mesh scale (never alters BALL_RADIUS)
+    if (this.kickPulseAge < 0.11) {
+      this.kickPulseAge += dt;
+      const pulseT = Math.min(1, this.kickPulseAge / 0.11);
+      const bump = Math.sin(pulseT * Math.PI) * this.kickPulseStrength;
+      this.sphere.scale.setScalar(1 + bump);
+    } else if (this.sphere.scale.x !== 1) {
+      this.sphere.scale.setScalar(1);
+    }
+
+    if (this.kickRingMesh.visible) {
+      this.kickRingAge += dt;
+      if (this.kickRingAge >= this.kickRingMaxAge) {
+        this.kickRingMesh.visible = false;
+        this.kickRingMat.opacity = 0;
+      } else {
+        const p = this.kickRingAge / this.kickRingMaxAge;
+        this.kickRingMesh.scale.setScalar(1 + p * (this.kickRingMaxScale - 1));
+        this.kickRingMat.opacity = (1 - p) * 0.48;
+      }
+    }
+
+    // Step pre-allocated directional departure micro-sparks (zero allocations)
+    for (let i = 0; i < BURST_POOL_SIZE; i++) {
+      const shard = this.burstShards[i];
+      if (!shard.active) continue;
+      shard.age += dt;
+      if (shard.age >= shard.maxAge) {
+        shard.active = false;
+        shard.mesh.visible = false;
+        shard.mat.opacity = 0;
+        continue;
+      }
+      const life = 1 - shard.age / shard.maxAge;
+      shard.mesh.position.x += shard.vx * dt;
+      shard.mesh.position.y = Math.max(0.03, shard.mesh.position.y + shard.vy * dt);
+      shard.mesh.position.z += shard.vz * dt;
+      shard.vy -= 5.8 * dt;
+      shard.mesh.scale.set(Math.max(0.2, life), Math.max(0.2, life), Math.max(0.25, life * 1.25));
+      shard.mat.opacity = life * 0.52;
+    }
+
     // Ground contact shadow stays directly underneath the ball on the turf
-    this.shadowDisc.position.set(ball.position.x, 0.018, ball.position.z);
+    this.shadowDisc.position.set(renderX, 0.018, renderZ);
     const heightAboveTurf = Math.max(0, ball.position.y - BALL_RADIUS);
     const scale = Math.max(0.45, 1 - heightAboveTurf * 0.14);
     this.shadowDisc.scale.setScalar(scale);
@@ -281,7 +490,6 @@ export class BallVisual {
     );
 
     // Subtle speed streak only on powerful driven shots (> 18 m/s)
-    const totalSpeed = Math.hypot(ball.velocity.x, ball.velocity.y, ball.velocity.z);
     this.trailSpawnAccum += dt;
     if (ball.ownerId === null && totalSpeed > 18.0 && this.trailSpawnAccum >= 0.028) {
       this.trailSpawnAccum = 0;
@@ -318,6 +526,12 @@ export class BallVisual {
     (this.sphere.material as THREE.Material).dispose();
     this.shadowDisc.geometry.dispose();
     (this.shadowDisc.material as THREE.Material).dispose();
+    this.kickRingMesh.geometry.dispose();
+    this.kickRingMat.dispose();
+    this.burstGeo.dispose();
+    for (const shard of this.burstShards) {
+      shard.mat.dispose();
+    }
     this.trailGeo.dispose();
     for (const node of this.trailNodes) {
       node.mat.dispose();

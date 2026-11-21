@@ -1,34 +1,54 @@
-import { computeCrowdGainLevels } from './crowdLogic';
+import {
+  canTriggerSound,
+  computeCrowdGainLevels,
+  computeEffectiveCrowdIntensity,
+  SoundChannelId,
+} from './crowdLogic';
 
 export type CrowdReactionType = 'ooh' | 'applause' | 'boo';
 
 class SoundEngine {
   private ctx: AudioContext | null = null;
+  private masterBus: GainNode | null = null;
   private enabled = true;
   private unlocked = false;
 
+  // Preloaded reusable audio buffers (synthesized once, zero runtime buffer allocations)
+  private crowdBedBuffer: AudioBuffer | null = null;
+  private roarBuffer: AudioBuffer | null = null;
+  private applauseBuffer: AudioBuffer | null = null;
+  private shortNoiseBuffer: AudioBuffer | null = null;
+
   // Continuous stadium spectator ambience nodes
   private crowdStarted = false;
-  private crowdIntensity = 0.22;
+  private baseCrowdIntensity = 0.22;
+  private reactionBoostPeak = 0;
+  private reactionBoostStartMs = 0;
+  private reactionBoostDecaySec = 0;
   private crowdMurmurGain: GainNode | null = null;
   private crowdChatterGain: GainNode | null = null;
   private crowdChatterFilter: BiquadFilterNode | null = null;
   private crowdMasterGain: GainNode | null = null;
   private crowdNodes: AudioNode[] = [];
 
+  // Per-channel cooldown timestamps to prevent duplicate simultaneous triggers
+  private readonly lastTriggeredMs: Partial<Record<SoundChannelId, number>> = {};
+
   constructor() {
     if (typeof window !== 'undefined') {
       const unlock = () => {
         this.unlocked = true;
-        if (this.ctx && this.ctx.state === 'suspended') {
-          void this.ctx.resume().catch(() => undefined);
+        const ctx = this.ensureContext();
+        if (ctx && ctx.state === 'suspended') {
+          void ctx.resume().catch(() => undefined);
         }
-        if (this.enabled && this.crowdIntensity > 0) {
+        if (this.enabled && this.baseCrowdIntensity > 0) {
           this.ensureCrowdAmbience();
           this.applyCrowdLevels();
         }
       };
       window.addEventListener('pointerdown', unlock, { passive: true });
+      window.addEventListener('touchstart', unlock, { passive: true });
       window.addEventListener('keydown', unlock, { passive: true });
     }
   }
@@ -37,7 +57,7 @@ class SoundEngine {
     this.enabled = enabled;
     if (!enabled) {
       this.muteCrowdNow();
-    } else if (this.unlocked && this.crowdIntensity > 0) {
+    } else if (this.unlocked && this.baseCrowdIntensity > 0) {
       this.ensureCrowdAmbience();
       this.applyCrowdLevels();
     }
@@ -48,17 +68,39 @@ class SoundEngine {
   }
 
   public isCrowdActive(): boolean {
-    return this.crowdStarted && this.enabled && this.crowdIntensity > 0.001;
+    return this.crowdStarted && this.enabled && this.baseCrowdIntensity > 0.001;
+  }
+
+  public getEffectiveCrowdIntensity(): number {
+    const elapsedSec = Math.max(0, (performance.now() - this.reactionBoostStartMs) / 1000);
+    return computeEffectiveCrowdIntensity(
+      this.baseCrowdIntensity,
+      this.reactionBoostPeak,
+      elapsedSec,
+      this.reactionBoostDecaySec,
+    );
   }
 
   public updateCrowdIntensity(intensity: number): void {
-    this.crowdIntensity = Math.min(1, Math.max(0, intensity));
-    if (!this.enabled || this.crowdIntensity <= 0.001) {
+    this.baseCrowdIntensity = Math.min(1, Math.max(0, intensity));
+    if (!this.enabled || this.baseCrowdIntensity <= 0.001) {
       this.muteCrowdNow();
       return;
     }
     if (this.unlocked) {
       this.ensureCrowdAmbience();
+      this.applyCrowdLevels();
+    }
+  }
+
+  private triggerAmbienceSwell(boostPeak: number, decaySec: number): void {
+    const nowMs = performance.now();
+    const currentEffective = this.getEffectiveCrowdIntensity();
+    const desired = Math.min(1, this.baseCrowdIntensity + boostPeak);
+    if (desired >= currentEffective - 0.02) {
+      this.reactionBoostPeak = boostPeak;
+      this.reactionBoostStartMs = nowMs;
+      this.reactionBoostDecaySec = decaySec;
       this.applyCrowdLevels();
     }
   }
@@ -71,6 +113,25 @@ class SoundEngine {
         (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!AudioCtx) return null;
       this.ctx = new AudioCtx();
+
+      // Lightweight master bus with soft dynamics limiter for clean mobile speaker mixing
+      const master = this.ctx.createGain();
+      master.gain.value = 0.92;
+      if (typeof this.ctx.createDynamicsCompressor === 'function') {
+        const comp = this.ctx.createDynamicsCompressor();
+        comp.threshold.value = -12;
+        comp.knee.value = 18;
+        comp.ratio.value = 4;
+        comp.attack.value = 0.008;
+        comp.release.value = 0.18;
+        master.connect(comp);
+        comp.connect(this.ctx.destination);
+      } else {
+        master.connect(this.ctx.destination);
+      }
+      this.masterBus = master;
+
+      this.preloadBuffers(this.ctx);
     }
     if (this.ctx.state === 'suspended') {
       void this.ctx.resume().catch(() => undefined);
@@ -78,18 +139,22 @@ class SoundEngine {
     return this.ctx;
   }
 
-  private ensureCrowdAmbience(): void {
-    if (this.crowdStarted) return;
-    const ctx = this.ensureContext();
-    if (!ctx) return;
+  private getOutputNode(ctx: AudioContext): AudioNode {
+    return this.masterBus ?? ctx.destination;
+  }
 
-    // 4-second seamless pink-shaped noise loop for rich stadium spectator bed
-    const durationSec = 4;
-    const bufferSize = Math.floor(ctx.sampleRate * durationSec);
-    const buffer = ctx.createBuffer(2, bufferSize, ctx.sampleRate);
+  /**
+   * Pre-synthesizes all reusable noise/applause/roar AudioBuffers once at audio unlock
+   * so gameplay triggers never allocate fresh AudioBuffers per frame or per event.
+   */
+  private preloadBuffers(ctx: AudioContext): void {
+    if (this.crowdBedBuffer) return;
 
+    // 1. 4-second seamless stereo pink-shaped noise bed for permanent stadium murmur
+    const bedSamples = Math.floor(ctx.sampleRate * 4.0);
+    const bedBuf = ctx.createBuffer(2, bedSamples, ctx.sampleRate);
     for (let ch = 0; ch < 2; ch++) {
-      const data = buffer.getChannelData(ch);
+      const data = bedBuf.getChannelData(ch);
       let b0 = 0;
       let b1 = 0;
       let b2 = 0;
@@ -97,7 +162,7 @@ class SoundEngine {
       let b4 = 0;
       let b5 = 0;
       let b6 = 0;
-      for (let i = 0; i < bufferSize; i++) {
+      for (let i = 0; i < bedSamples; i++) {
         const white = Math.random() * 2 - 1;
         b0 = 0.99886 * b0 + white * 0.0555179;
         b1 = 0.99332 * b1 + white * 0.0750759;
@@ -108,19 +173,65 @@ class SoundEngine {
         data[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.085;
         b6 = white * 0.115926;
       }
-      // Crossfade edges for click-free looping
-      const fadeSamples = Math.min(2048, Math.floor(bufferSize * 0.05));
+      const fadeSamples = Math.min(2048, Math.floor(bedSamples * 0.05));
       for (let i = 0; i < fadeSamples; i++) {
         const t = i / fadeSamples;
-        const tailIdx = bufferSize - fadeSamples + i;
+        const tailIdx = bedSamples - fadeSamples + i;
         const blended = data[i] * t + data[tailIdx] * (1 - t);
         data[i] = blended;
         data[tailIdx] = blended;
       }
     }
+    this.crowdBedBuffer = bedBuf;
+
+    // 2. 2.8-second rich stereo crowd roar buffer (reused for goals, dangerous shots, boos)
+    const roarSamples = Math.floor(ctx.sampleRate * 2.8);
+    const roarBuf = ctx.createBuffer(2, roarSamples, ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const data = roarBuf.getChannelData(ch);
+      let prev = 0;
+      for (let i = 0; i < roarSamples; i++) {
+        const w = Math.random() * 2 - 1;
+        prev = prev * 0.52 + w * 0.48;
+        data[i] = prev * 0.55;
+      }
+    }
+    this.roarBuffer = roarBuf;
+
+    // 3. 1.6-second stereo textured stadium applause buffer (modulated micro-clap bursts)
+    const appSamples = Math.floor(ctx.sampleRate * 1.6);
+    const appBuf = ctx.createBuffer(2, appSamples, ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const data = appBuf.getChannelData(ch);
+      for (let i = 0; i < appSamples; i++) {
+        const tSec = i / ctx.sampleRate;
+        // Layered rapid clap-rate modulation gives organic stadium clapping texture
+        const clapMod =
+          0.55 +
+          0.25 * Math.sin(tSec * 52 + ch * 1.7) +
+          0.2 * Math.sin(tSec * 83 + ch * 0.9);
+        data[i] = (Math.random() * 2 - 1) * 0.44 * clapMod;
+      }
+    }
+    this.applauseBuffer = appBuf;
+
+    // 4. 0.30-second mono short impact noise buffer (reused for net swish & tackle)
+    const shortSamples = Math.floor(ctx.sampleRate * 0.3);
+    const shortBuf = ctx.createBuffer(1, shortSamples, ctx.sampleRate);
+    const shortData = shortBuf.getChannelData(0);
+    for (let i = 0; i < shortSamples; i++) {
+      shortData[i] = (Math.random() * 2 - 1) * 0.46;
+    }
+    this.shortNoiseBuffer = shortBuf;
+  }
+
+  private ensureCrowdAmbience(): void {
+    if (this.crowdStarted) return;
+    const ctx = this.ensureContext();
+    if (!ctx || !this.crowdBedBuffer) return;
 
     const source = ctx.createBufferSource();
-    source.buffer = buffer;
+    source.buffer = this.crowdBedBuffer;
     source.loop = true;
 
     // Layer 1: Warm low stadium murmur
@@ -160,7 +271,7 @@ class SoundEngine {
     chatterFilter.connect(chatterGain);
     chatterGain.connect(masterGain);
 
-    masterGain.connect(ctx.destination);
+    masterGain.connect(this.getOutputNode(ctx));
 
     source.start();
     lfo.start();
@@ -169,19 +280,36 @@ class SoundEngine {
     this.crowdChatterGain = chatterGain;
     this.crowdChatterFilter = chatterFilter;
     this.crowdMasterGain = masterGain;
-    this.crowdNodes = [source, lfo, murmurFilter, chatterFilter, murmurGain, chatterGain, lfoGain, masterGain];
+    this.crowdNodes = [
+      source,
+      lfo,
+      murmurFilter,
+      chatterFilter,
+      murmurGain,
+      chatterGain,
+      lfoGain,
+      masterGain,
+    ];
     this.crowdStarted = true;
   }
 
   private applyCrowdLevels(): void {
-    if (!this.ctx || !this.crowdStarted || !this.crowdMurmurGain || !this.crowdChatterGain || !this.crowdChatterFilter || !this.crowdMasterGain) {
+    if (
+      !this.ctx ||
+      !this.crowdStarted ||
+      !this.crowdMurmurGain ||
+      !this.crowdChatterGain ||
+      !this.crowdChatterFilter ||
+      !this.crowdMasterGain
+    ) {
       return;
     }
     const now = this.ctx.currentTime;
-    const levels = computeCrowdGainLevels(this.enabled ? this.crowdIntensity : 0);
+    const effective = this.enabled ? this.getEffectiveCrowdIntensity() : 0;
+    const levels = computeCrowdGainLevels(effective);
     this.crowdMasterGain.gain.setTargetAtTime(this.enabled ? 1 : 0, now, 0.15);
-    this.crowdMurmurGain.gain.setTargetAtTime(levels.murmurGain, now, 0.25);
-    this.crowdChatterGain.gain.setTargetAtTime(levels.chatterGain, now, 0.25);
+    this.crowdMurmurGain.gain.setTargetAtTime(levels.murmurGain, now, 0.28);
+    this.crowdChatterGain.gain.setTargetAtTime(levels.chatterGain, now, 0.28);
     this.crowdChatterFilter.frequency.setTargetAtTime(levels.chatterFreqHz, now, 0.35);
   }
 
@@ -194,6 +322,7 @@ class SoundEngine {
   public playKick(power = 1): void {
     const ctx = this.ensureContext();
     if (!ctx) return;
+    if (!canTriggerSound(this.lastTriggeredMs, 'kick', performance.now())) return;
 
     const now = ctx.currentTime;
     const osc = ctx.createOscillator();
@@ -207,7 +336,7 @@ class SoundEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
 
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    gain.connect(this.getOutputNode(ctx));
     osc.start(now);
     osc.stop(now + 0.14);
   }
@@ -215,7 +344,9 @@ class SoundEngine {
   public playWhistle(pattern: 'short' | 'double' | 'long' = 'short'): void {
     const ctx = this.ensureContext();
     if (!ctx) return;
+    if (!canTriggerSound(this.lastTriggeredMs, 'whistle', performance.now())) return;
 
+    const out = this.getOutputNode(ctx);
     const triggerBlast = (offset: number, duration: number) => {
       const now = ctx.currentTime + offset;
       const osc1 = ctx.createOscillator();
@@ -234,7 +365,7 @@ class SoundEngine {
 
       osc1.connect(gain);
       osc2.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(out);
       osc1.start(now);
       osc2.start(now);
       osc1.stop(now + duration + 0.01);
@@ -254,6 +385,7 @@ class SoundEngine {
   public playPostHit(): void {
     const ctx = this.ensureContext();
     if (!ctx) return;
+    if (!canTriggerSound(this.lastTriggeredMs, 'postHit', performance.now())) return;
 
     const now = ctx.currentTime;
     const osc = ctx.createOscillator();
@@ -265,100 +397,97 @@ class SoundEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
 
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    gain.connect(this.getOutputNode(ctx));
     osc.start(now);
     osc.stop(now + 0.28);
   }
 
   public playGoalCheer(): void {
     const ctx = this.ensureContext();
-    if (!ctx) return;
+    if (!ctx || !this.roarBuffer || !this.applauseBuffer) return;
+    if (!canTriggerSound(this.lastTriggeredMs, 'goalCheer', performance.now())) return;
+
+    this.triggerAmbienceSwell(0.55, 4.5);
 
     const now = ctx.currentTime;
-    const duration = 2.6;
-    const bufferSize = Math.floor(ctx.sampleRate * duration);
-    const buffer = ctx.createBuffer(2, bufferSize, ctx.sampleRate);
-    for (let ch = 0; ch < 2; ch++) {
-      const data = buffer.getChannelData(ch);
-      for (let i = 0; i < bufferSize; i++) {
-        data[i] = (Math.random() * 2 - 1) * 0.55;
-      }
-    }
+    const duration = 2.7;
+    const out = this.getOutputNode(ctx);
 
-    // Layer A: Deep stadium roar
+    // Layer A: Deep stadium goal roar (reuses preloaded stereo roarBuffer)
     const roar = ctx.createBufferSource();
-    roar.buffer = buffer;
+    roar.buffer = this.roarBuffer;
     const roarFilter = ctx.createBiquadFilter();
     roarFilter.type = 'bandpass';
     roarFilter.frequency.setValueAtTime(520, now);
-    roarFilter.frequency.linearRampToValueAtTime(840, now + 0.45);
-    roarFilter.frequency.exponentialRampToValueAtTime(580, now + duration);
-    roarFilter.Q.setValueAtTime(0.9, now);
+    roarFilter.frequency.linearRampToValueAtTime(880, now + 0.42);
+    roarFilter.frequency.exponentialRampToValueAtTime(560, now + duration);
+    roarFilter.Q.setValueAtTime(0.85, now);
 
     const roarGain = ctx.createGain();
     roarGain.gain.setValueAtTime(0.001, now);
-    roarGain.gain.linearRampToValueAtTime(0.24, now + 0.14);
-    roarGain.gain.setValueAtTime(0.21, now + 1.1);
+    roarGain.gain.linearRampToValueAtTime(0.26, now + 0.14);
+    roarGain.gain.setValueAtTime(0.22, now + 1.25);
     roarGain.gain.exponentialRampToValueAtTime(0.001, now + duration);
 
     roar.connect(roarFilter);
     roarFilter.connect(roarGain);
-    roarGain.connect(ctx.destination);
+    roarGain.connect(out);
     roar.start(now);
     roar.stop(now + duration);
 
-    // Layer B: Bright cheering & applause shimmer
+    // Layer B: Bright cheering & stadium applause shimmer (reuses preloaded applauseBuffer)
     const clap = ctx.createBufferSource();
-    clap.buffer = buffer;
+    clap.buffer = this.applauseBuffer;
+    clap.loop = true;
     const clapFilter = ctx.createBiquadFilter();
     clapFilter.type = 'bandpass';
     clapFilter.frequency.setValueAtTime(1650, now);
-    clapFilter.Q.setValueAtTime(1.2, now);
+    clapFilter.Q.setValueAtTime(1.05, now);
 
     const clapGain = ctx.createGain();
     clapGain.gain.setValueAtTime(0.001, now);
-    clapGain.gain.linearRampToValueAtTime(0.11, now + 0.25);
+    clapGain.gain.linearRampToValueAtTime(0.13, now + 0.22);
     clapGain.gain.exponentialRampToValueAtTime(0.001, now + duration);
 
     clap.connect(clapFilter);
     clapFilter.connect(clapGain);
-    clapGain.connect(ctx.destination);
+    clapGain.connect(out);
     clap.start(now);
     clap.stop(now + duration);
   }
 
   public playCrowdReaction(type: CrowdReactionType): void {
     const ctx = this.ensureContext();
-    if (!ctx) return;
+    if (!ctx || !this.roarBuffer || !this.applauseBuffer) return;
+    if (!canTriggerSound(this.lastTriggeredMs, type, performance.now())) return;
 
     const now = ctx.currentTime;
-    const duration = type === 'ooh' ? 0.95 : type === 'applause' ? 1.15 : 0.85;
-    const bufferSize = Math.floor(ctx.sampleRate * duration);
-    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      data[i] = (Math.random() * 2 - 1) * 0.48;
-    }
+    const out = this.getOutputNode(ctx);
+    const duration = type === 'ooh' ? 1.05 : type === 'applause' ? 1.25 : 0.85;
 
     const noise = ctx.createBufferSource();
-    noise.buffer = buffer;
+    noise.buffer = type === 'applause' ? this.applauseBuffer : this.roarBuffer;
 
     const filter = ctx.createBiquadFilter();
     filter.type = 'bandpass';
     const gain = ctx.createGain();
 
     if (type === 'ooh') {
-      filter.frequency.setValueAtTime(880, now);
-      filter.frequency.exponentialRampToValueAtTime(430, now + duration);
-      filter.Q.setValueAtTime(1.7, now);
+      // Dangerous shot / near-miss crowd gasp & swell
+      this.triggerAmbienceSwell(0.34, 2.2);
+      filter.frequency.setValueAtTime(920, now);
+      filter.frequency.exponentialRampToValueAtTime(420, now + duration);
+      filter.Q.setValueAtTime(1.6, now);
       gain.gain.setValueAtTime(0.001, now);
-      gain.gain.linearRampToValueAtTime(0.16, now + 0.12);
+      gain.gain.linearRampToValueAtTime(0.18, now + 0.11);
       gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
     } else if (type === 'applause') {
-      filter.frequency.setValueAtTime(1450, now);
-      filter.Q.setValueAtTime(0.85, now);
+      // Crisp applause for successful passes, dribbles, or saves
+      this.triggerAmbienceSwell(0.2, 1.8);
+      filter.frequency.setValueAtTime(1520, now);
+      filter.Q.setValueAtTime(0.82, now);
       gain.gain.setValueAtTime(0.001, now);
-      gain.gain.linearRampToValueAtTime(0.11, now + 0.16);
+      gain.gain.linearRampToValueAtTime(0.12, now + 0.14);
       gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
     } else {
       filter.frequency.setValueAtTime(340, now);
@@ -371,25 +500,19 @@ class SoundEngine {
 
     noise.connect(filter);
     filter.connect(gain);
-    gain.connect(ctx.destination);
-    noise.start(now);
+    gain.connect(out);
+    noise.start(now, 0, duration);
     noise.stop(now + duration);
   }
 
   public playNetSwish(): void {
     const ctx = this.ensureContext();
-    if (!ctx) return;
+    if (!ctx || !this.shortNoiseBuffer) return;
+    if (!canTriggerSound(this.lastTriggeredMs, 'netSwish', performance.now())) return;
 
     const now = ctx.currentTime;
-    const bufferSize = Math.floor(ctx.sampleRate * 0.24);
-    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      data[i] = (Math.random() * 2 - 1) * 0.45;
-    }
-
     const noise = ctx.createBufferSource();
-    noise.buffer = buffer;
+    noise.buffer = this.shortNoiseBuffer;
 
     const filter = ctx.createBiquadFilter();
     filter.type = 'highpass';
@@ -402,25 +525,19 @@ class SoundEngine {
 
     noise.connect(filter);
     filter.connect(gain);
-    gain.connect(ctx.destination);
-    noise.start(now);
+    gain.connect(this.getOutputNode(ctx));
+    noise.start(now, 0, 0.24);
     noise.stop(now + 0.24);
   }
 
   public playTackle(): void {
     const ctx = this.ensureContext();
-    if (!ctx) return;
+    if (!ctx || !this.shortNoiseBuffer) return;
+    if (!canTriggerSound(this.lastTriggeredMs, 'tackle', performance.now())) return;
 
     const now = ctx.currentTime;
-    const bufferSize = Math.floor(ctx.sampleRate * 0.18);
-    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      data[i] = (Math.random() * 2 - 1) * 0.35;
-    }
-
     const noise = ctx.createBufferSource();
-    noise.buffer = buffer;
+    noise.buffer = this.shortNoiseBuffer;
 
     const filter = ctx.createBiquadFilter();
     filter.type = 'bandpass';
@@ -434,8 +551,8 @@ class SoundEngine {
 
     noise.connect(filter);
     filter.connect(gain);
-    gain.connect(ctx.destination);
-    noise.start(now);
+    gain.connect(this.getOutputNode(ctx));
+    noise.start(now, 0, 0.18);
     noise.stop(now + 0.18);
   }
 

@@ -4,7 +4,9 @@ import {
   blendArticulatedPose,
   createAnimMemory,
   createDefaultPose,
+  dampFacingAngle,
   evaluateTargetPose,
+  PlayerAnimClip,
   PlayerAnimSignals,
   resolvePlayerAnimClip,
   shortestAngleDelta,
@@ -105,4 +107,71 @@ test('blendArticulatedPose interpolates smoothly without instant snapping and co
 test('shortestAngleDelta wraps cleanly across PI boundary', () => {
   const delta = shortestAngleDelta(Math.PI - 0.1, -Math.PI + 0.1);
   assert.ok(Math.abs(delta - 0.2) < 1e-6);
+});
+
+test('resolvePlayerAnimClip triggers receive on fresh ball possession and settles back to idle/run', () => {
+  const mem = createAnimMemory();
+  resolvePlayerAnimClip(makeSignals({ speed: 1.5, hasBall: false }), mem);
+  const clip = resolvePlayerAnimClip(makeSignals({ speed: 1.5, hasBall: true, dt: 0.016 }), mem);
+  assert.equal(clip, 'receive');
+
+  // After ~0.35s, receive timer decays cleanly back into locomotion
+  let afterClip: PlayerAnimClip = clip;
+  for (let i = 0; i < 10; i++) {
+    afterClip = resolvePlayerAnimClip(makeSignals({ speed: 1.5, hasBall: true, dt: 0.04 }), mem);
+  }
+  assert.equal(afterClip, 'walk');
+});
+
+test('dampFacingAngle smoothly turns along shortest arc without instant snapping', () => {
+  const start = Math.PI - 0.15;
+  const target = -Math.PI + 0.15; // 0.30 rad across the PI boundary
+  const next = dampFacingAngle(start, target, 14, 0.016);
+  const moved = shortestAngleDelta(start, next);
+  assert.ok(moved > 0.03 && moved < 0.25);
+
+  let cur = start;
+  for (let i = 0; i < 40; i++) {
+    cur = dampFacingAngle(cur, target, 14, 0.016);
+  }
+  assert.ok(Math.abs(shortestAngleDelta(cur, target)) < 0.01);
+});
+
+test('evaluateTargetPose applies shot-charge leg wind-up anticipation before kick release', () => {
+  const mem = createAnimMemory();
+  const neutral = createDefaultPose();
+  const wound = createDefaultPose();
+  evaluateTargetPose('idle', makeSignals({ shotCharge: 0 }), mem, neutral);
+  evaluateTargetPose('idle', makeSignals({ shotCharge: 0.85 }), mem, wound);
+  assert.ok(wound.rightHipPitch > neutral.rightHipPitch + 0.25);
+  assert.ok(wound.rightKneeFlex > neutral.rightKneeFlex + 0.3);
+});
+
+test('resolvePlayerAnimClip detects opponent interception recovery and power-shot reactions', () => {
+  const mem = createAnimMemory();
+  resolvePlayerAnimClip(
+    makeSignals({ team: 'home', hasBall: false, ballLastTouchTeam: 'away' }),
+    mem,
+  );
+  const clip = resolvePlayerAnimClip(
+    makeSignals({ team: 'home', hasBall: true, ballLastTouchTeam: 'home', speed: 2.2 }),
+    mem,
+  );
+  assert.equal(clip, 'receive');
+  assert.equal(mem.reactionKind, 'intercept');
+  assert.ok(mem.reactionTimer > 0.2);
+
+  const shotMem = createAnimMemory();
+  resolvePlayerAnimClip(
+    makeSignals({ actionState: 'kick', ballSpeed: 26, shotCharge: 0.8 }),
+    shotMem,
+  );
+  assert.equal(shotMem.reactionKind, 'power_shot');
+  assert.ok(shotMem.reactionTimer > 0.25);
+
+  const scorerPose = createDefaultPose();
+  const teammatePose = createDefaultPose();
+  evaluateTargetPose('celebration', makeSignals({ actionState: 'celebrate', isGoalScorer: true }), shotMem, scorerPose);
+  evaluateTargetPose('celebration', makeSignals({ actionState: 'celebrate', isGoalScorer: false }), shotMem, teammatePose);
+  assert.ok(scorerPose.leftShoulderRoll > teammatePose.leftShoulderRoll + 0.3);
 });

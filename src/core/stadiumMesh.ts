@@ -16,6 +16,7 @@ import {
   PITCH_WIDTH,
 } from './constants';
 import { QualityLevel } from './types';
+import { StadiumCrowd } from './crowdMesh';
 
 function createPitchTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
@@ -297,7 +298,7 @@ function createAdBoardTexture(): THREE.CanvasTexture {
 
 export interface StadiumResources {
   group: THREE.Group;
-  update: (elapsed: number, isGoalCelebration: boolean) => void;
+  update: (elapsed: number, isGoalCelebration: boolean, excitement?: number) => void;
   setQuality: (quality: QualityLevel) => void;
   dispose: () => void;
 }
@@ -632,58 +633,10 @@ export function buildStadium(
     group.add(standGroup);
   }
 
-  // Instanced spectators on North, East, West stands with live quality-adaptive LOD count
-  const maxCrowdCount = 1140;
-  const getCrowdCountForQuality = (q: QualityLevel) =>
-    q === 'low' ? 360 : q === 'medium' ? 750 : maxCrowdCount;
-  const specGeo = new THREE.BoxGeometry(0.55, 0.92, 0.42);
-  const specMat = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
-    roughness: 0.78,
-  });
-  disposables.push(specGeo, specMat);
-
-  const crowdInstanced = new THREE.InstancedMesh(specGeo, specMat, maxCrowdCount);
-  const dummy = new THREE.Object3D();
-  const color = new THREE.Color();
-  const palette = [0x0f62fe, 0xdc2626, 0xf8fafc, 0xf59e0b, 0x38bdf8, 0x10b981];
-
-  for (let i = 0; i < maxCrowdCount; i++) {
-    const section = i % 3;
-    const tier = i % 3;
-    if (section === 0) {
-      // North stand: tier 0 is front (+z toward pitch), tier 2 is back (-z)
-      const x = ((i * 13.7) % 118) - 59;
-      const z = -HALF_WIDTH - 10.2 - tier * 4.2;
-      const y = 3.3 + tier * 2.9;
-      dummy.position.set(x, y, z);
-    } else if (section === 1) {
-      // West stand
-      const z = ((i * 11.3) % 72) - 36;
-      const x = -HALF_LENGTH - 10.2 - tier * 3.9;
-      const y = 3.2 + tier * 2.75;
-      dummy.position.set(x, y, z);
-    } else {
-      // East stand
-      const z = ((i * 17.1) % 72) - 36;
-      const x = HALF_LENGTH + 10.2 + tier * 3.9;
-      const y = 3.2 + tier * 2.75;
-      dummy.position.set(x, y, z);
-    }
-
-    const scaleJitter = 0.88 + ((i % 7) / 7) * 0.24;
-    dummy.scale.set(scaleJitter, scaleJitter, scaleJitter);
-    dummy.updateMatrix();
-    crowdInstanced.setMatrixAt(i, dummy.matrix);
-
-    color.setHex(palette[i % palette.length]);
-    crowdInstanced.setColorAt(i, color);
-  }
-  crowdInstanced.instanceMatrix.needsUpdate = true;
-  if (crowdInstanced.instanceColor) crowdInstanced.instanceColor.needsUpdate = true;
-  crowdInstanced.count = getCrowdCountForQuality(quality);
-  crowdInstanced.computeBoundingSphere();
-  group.add(crowdInstanced);
+  // Instanced animated stadium spectators across North, West, East, and South stands (4 draw calls total)
+  const crowd = new StadiumCrowd(quality);
+  group.add(crowd.group);
+  disposables.push(crowd);
 
   // 7. Four Daytime Stadium Light Masts (no night-time additive glow halos)
   const towerPoleGeo = new THREE.CylinderGeometry(0.42, 0.7, 27, 8);
@@ -713,11 +666,14 @@ export function buildStadium(
 
   return {
     group,
-    update: (elapsed: number, isGoalCelebration: boolean) => {
+    update: (elapsed: number, isGoalCelebration: boolean, excitement = 0.35) => {
       // Gentle stadium breeze flutter on corner flags
       for (let i = 0; i < flagCloths.length; i++) {
         flagCloths[i].rotation.y = Math.sin(elapsed * 5.0 + i * 1.3) * 0.28;
       }
+
+      // Lightweight procedural spectator animation (sway, applause, goal jumping)
+      crowd.update(elapsed, isGoalCelebration, excitement);
 
       // Dynamic LED ad-board highlight pulse during goal celebrations
       if (isGoalCelebration) {
@@ -730,7 +686,7 @@ export function buildStadium(
       }
     },
     setQuality: (nextQuality: QualityLevel) => {
-      crowdInstanced.count = getCrowdCountForQuality(nextQuality);
+      crowd.setQuality(nextQuality);
     },
     dispose: () => {
       for (const d of disposables) {

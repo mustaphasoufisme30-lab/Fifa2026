@@ -1,4 +1,15 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import {
+  ArrowUpRight,
+  ChevronsUp,
+  Crosshair,
+  RefreshCw,
+  Send,
+  Shield,
+  Target,
+  Zap,
+} from 'lucide-react';
+import { ControlPadMode } from '../core/types';
 import { InputManager } from '../controls/inputManager';
 import { computeAnalogJoystickVector } from '../controls/joystickMath';
 
@@ -6,6 +17,7 @@ interface TouchControlsProps {
   inputManager: InputManager;
   hasBall: boolean;
   shotCharge: number;
+  controlMode: ControlPadMode;
 }
 
 function safeSetPointerCapture(el: HTMLElement, pointerId: number): void {
@@ -18,19 +30,53 @@ function safeSetPointerCapture(el: HTMLElement, pointerId: number): void {
   }
 }
 
-export function TouchControls({ inputManager, hasBall, shotCharge }: TouchControlsProps) {
+export function TouchControls({
+  inputManager,
+  hasBall,
+  shotCharge,
+  controlMode,
+}: TouchControlsProps) {
   const joyBaseRef = useRef<HTMLDivElement | null>(null);
   const joyPointerId = useRef<number | null>(null);
   const sprintPointerId = useRef<number | null>(null);
-  const shootPointerId = useRef<number | null>(null);
-  const pressPointerId = useRef<number | null>(null);
+  const topPointerId = useRef<number | null>(null);
+  const upperLeftPointerId = useRef<number | null>(null);
+  const prevModeRef = useRef<ControlPadMode>(controlMode);
 
   const [knobOffset, setKnobOffset] = useState({ x: 0, y: 0 });
   const [joyActive, setJoyActive] = useState(false);
   const [joyAngleDeg, setJoyAngleDeg] = useState(0);
+
   const [sprintHeld, setSprintHeld] = useState(false);
   const [pressHeld, setPressHeld] = useState(false);
   const [shootHeld, setShootHeld] = useState(false);
+  const [modeTransitioning, setModeTransitioning] = useState(false);
+
+  const isAttack = controlMode === 'ATTACK';
+
+  // Safely release mode-specific held inputs and run a brief non-blocking transition pulse on mode switch.
+  useEffect(() => {
+    if (prevModeRef.current === controlMode) return;
+    prevModeRef.current = controlMode;
+
+    if (controlMode !== 'ATTACK') {
+      topPointerId.current = null;
+      setShootHeld(false);
+      inputManager.setTouchShootHeld(false);
+    }
+    if (controlMode !== 'DEFENSE') {
+      upperLeftPointerId.current = null;
+      setPressHeld(false);
+      inputManager.setTouchPress(false);
+    }
+
+    setModeTransitioning(true);
+    const timer = window.setTimeout(() => {
+      setModeTransitioning(false);
+    }, 150);
+
+    return () => window.clearTimeout(timer);
+  }, [controlMode, inputManager]);
 
   const updateJoystick = (clientX: number, clientY: number) => {
     const el = joyBaseRef.current;
@@ -63,21 +109,21 @@ export function TouchControls({ inputManager, hasBall, shotCharge }: TouchContro
   };
 
   const releasePress = () => {
-    pressPointerId.current = null;
+    upperLeftPointerId.current = null;
     setPressHeld(false);
     inputManager.setTouchPress(false);
   };
 
   const releaseShoot = () => {
-    shootPointerId.current = null;
+    topPointerId.current = null;
     setShootHeld(false);
     inputManager.setTouchShootHeld(false);
   };
 
+  const transitionScaleClass = modeTransitioning ? 'scale-95 opacity-85' : 'scale-100 opacity-100';
+
   return (
-    <div
-      className="fixed inset-x-0 bottom-0 z-20 flex items-end justify-between px-4 sm:px-6 md:px-8 pb-[max(1rem,env(safe-area-inset-bottom))] md:pb-6 pointer-events-none select-none"
-    >
+    <div className="fixed inset-x-0 bottom-0 z-20 flex items-end justify-between px-4 sm:px-6 md:px-8 pb-[max(0.85rem,env(safe-area-inset-bottom))] md:pb-6 pointer-events-none select-none">
       {/* Left Fixed 360° Analog Circular Joystick */}
       <div
         ref={joyBaseRef}
@@ -125,7 +171,7 @@ export function TouchControls({ inputManager, hasBall, shotCharge }: TouchContro
           </div>
         )}
 
-        {/* Analog Thumbstick Knob (instant drag response, smooth auto-center on release) */}
+        {/* Analog Thumbstick Knob */}
         <div
           style={{
             transform: `translate3d(${knobOffset.x}px, ${knobOffset.y}px, 0)`,
@@ -138,93 +184,163 @@ export function TouchControls({ inputManager, hasBall, shotCharge }: TouchContro
         />
       </div>
 
-      {/* Right Compact Circular Action Pad (all 6 actions unified around one thumb ring) */}
+      {/* Right Dynamic 4-Button Circular Action Pad (Auto ATTACK / DEFENSE) */}
       <div className="flex items-end pointer-events-auto touch-none">
         <div
           data-testid="touch-action-circle"
-          className="relative w-[176px] h-[176px] md:w-[200px] md:h-[200px] rounded-full bg-[#09121e]/24 border border-white/18 shrink-0 shadow-lg"
+          data-control-mode={controlMode}
+          className="relative w-[178px] h-[178px] md:w-[206px] md:h-[206px] shrink-0"
         >
-          {/* Subtle inner guide ring unifying all 6 thumb actions into one circular cluster */}
-          <div className="absolute inset-7 rounded-full border border-white/10 pointer-events-none" />
-
-          {/* 12h (TOP): TIR (Shoot — hold to charge, release to shoot) */}
+          {/* SLOT 1 — TOP-RIGHT (RED): TIR [ATTACK] <-> TACLE [DEFENSE] */}
           <button
             type="button"
-            aria-label="Tir"
-            data-testid="touch-btn-shoot"
+            aria-label={isAttack ? 'Tir' : 'Tacle'}
+            data-testid="touch-btn-top"
+            data-action={isAttack ? 'shoot' : 'tackle'}
             onPointerDown={(e) => {
               e.preventDefault();
-              if (shootPointerId.current !== null) return;
-              shootPointerId.current = e.pointerId;
-              safeSetPointerCapture(e.currentTarget, e.pointerId);
-              setShootHeld(true);
-              inputManager.setTouchShootHeld(true);
+              if (isAttack) {
+                if (topPointerId.current !== null) return;
+                topPointerId.current = e.pointerId;
+                safeSetPointerCapture(e.currentTarget, e.pointerId);
+                setShootHeld(true);
+                inputManager.setTouchShootHeld(true);
+              } else {
+                inputManager.triggerTackle();
+              }
             }}
             onPointerUp={(e) => {
-              if (shootPointerId.current === e.pointerId) {
+              if (topPointerId.current === e.pointerId) {
                 releaseShoot();
               }
             }}
             onPointerCancel={(e) => {
-              if (shootPointerId.current === e.pointerId) {
+              if (topPointerId.current === e.pointerId) {
                 releaseShoot();
               }
             }}
-            className={`absolute left-[50%] top-[16%] -translate-x-1/2 -translate-y-1/2 overflow-hidden w-[48px] h-[48px] md:w-[54px] md:h-[54px] rounded-full border-2 text-white font-display font-extrabold text-[11px] md:text-xs tracking-wider uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer ${
-              shootHeld
-                ? 'bg-rose-500/85 border-amber-300 scale-95'
-                : hasBall
-                  ? 'bg-[#0b1726]/72 border-emerald-400/90 active:bg-emerald-500/80'
-                  : 'bg-[#09121e]/64 border-white/45 active:bg-rose-500/80'
+            className={`absolute left-[78%] top-[24%] -translate-x-1/2 -translate-y-1/2 overflow-hidden w-[56px] h-[56px] md:w-[64px] md:h-[64px] rounded-full border-2 text-white font-display font-extrabold tracking-wider uppercase flex flex-col items-center justify-center shadow-[0_6px_18px_rgba(0,0,0,0.45)] touch-none cursor-pointer transition-all duration-150 ease-out ${transitionScaleClass} ${
+              isAttack
+                ? shootHeld
+                  ? 'bg-rose-500/85 border-amber-300 scale-95'
+                  : hasBall
+                    ? 'bg-rose-950/65 border-rose-400/95 active:bg-rose-500/80'
+                    : 'bg-[#1a0d14]/65 border-rose-400/75 active:bg-rose-500/80'
+                : 'bg-red-950/65 border-red-400/95 active:bg-red-500/85 active:scale-95'
             }`}
           >
-            {shotCharge > 0.02 && (
+            {/* Concentric APEX tactical ring */}
+            <span className="absolute inset-1 rounded-full border border-white/15 pointer-events-none" />
+            {isAttack && shotCharge > 0.02 && (
               <span
-                className="absolute inset-x-0 bottom-0 bg-amber-400/60 pointer-events-none"
+                className="absolute inset-x-0 bottom-0 bg-amber-400/65 pointer-events-none"
                 style={{ height: `${Math.round(shotCharge * 100)}%` }}
               />
             )}
-            <span className="relative z-10 leading-none">TIR</span>
-            <span className="relative z-10 text-[7px] text-white/75 font-sans leading-none mt-0.5">
-              SPC
+            <span className="relative z-10 flex flex-col items-center justify-center">
+              {isAttack ? (
+                <Target className="w-3.5 h-3.5 md:w-4 md:h-4 text-rose-200 mb-0.5" />
+              ) : (
+                <Zap className="w-3.5 h-3.5 md:w-4 md:h-4 text-red-200 mb-0.5" />
+              )}
+              <span className="text-[10px] md:text-[11px] leading-none">
+                {isAttack ? 'TIR' : 'TACLE'}
+              </span>
             </span>
           </button>
 
-          {/* 2h (UPPER-RIGHT): LOB */}
+          {/* SLOT 2 — UPPER-LEFT (AMBER): PROFOND. [ATTACK] <-> PRESSING [DEFENSE] */}
           <button
             type="button"
-            aria-label="Lob Pass"
-            data-testid="touch-btn-lob"
+            aria-label={isAttack ? 'Passe en profondeur' : 'Pressing'}
+            data-testid="touch-btn-upper-left"
+            data-action={isAttack ? 'through' : 'press'}
             onPointerDown={(e) => {
               e.preventDefault();
-              inputManager.triggerLob();
+              if (isAttack) {
+                inputManager.triggerLob();
+              } else {
+                if (upperLeftPointerId.current !== null) return;
+                upperLeftPointerId.current = e.pointerId;
+                safeSetPointerCapture(e.currentTarget, e.pointerId);
+                setPressHeld(true);
+                inputManager.setTouchPress(true);
+              }
             }}
-            className="absolute left-[79.4%] top-[33%] -translate-x-1/2 -translate-y-1/2 w-[48px] h-[48px] md:w-[54px] md:h-[54px] rounded-full bg-[#09121e]/62 active:bg-sky-500/80 border-2 border-cyan-300/65 text-white font-display font-bold text-[10px] md:text-[11px] tracking-wider uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer"
+            onPointerUp={(e) => {
+              if (upperLeftPointerId.current === e.pointerId) {
+                releasePress();
+              }
+            }}
+            onPointerCancel={(e) => {
+              if (upperLeftPointerId.current === e.pointerId) {
+                releasePress();
+              }
+            }}
+            className={`absolute left-[33%] top-[36%] -translate-x-1/2 -translate-y-1/2 overflow-hidden w-[56px] h-[56px] md:w-[64px] md:h-[64px] rounded-full border-2 font-display font-extrabold tracking-wide uppercase flex flex-col items-center justify-center shadow-[0_6px_18px_rgba(0,0,0,0.45)] touch-none cursor-pointer transition-all duration-150 ease-out ${transitionScaleClass} ${
+              isAttack
+                ? 'bg-amber-950/65 border-amber-400/90 text-white active:bg-amber-500/85 active:scale-95'
+                : pressHeld
+                  ? 'bg-amber-400/90 border-white text-slate-950 scale-95'
+                  : 'bg-orange-950/68 border-orange-400/95 text-white active:bg-orange-500/85'
+            }`}
           >
-            <span className="leading-none">LOB</span>
-            <span className="text-[7px] text-white/70 font-sans leading-none mt-0.5">L</span>
+            <span className="absolute inset-1 rounded-full border border-white/15 pointer-events-none" />
+            <span className="relative z-10 flex flex-col items-center justify-center">
+              {isAttack ? (
+                <Send className="w-3.5 h-3.5 md:w-4 md:h-4 text-amber-200 mb-0.5" />
+              ) : (
+                <Crosshair
+                  className={`w-3.5 h-3.5 md:w-4 md:h-4 mb-0.5 ${
+                    pressHeld ? 'text-slate-950' : 'text-orange-200'
+                  }`}
+                />
+              )}
+              <span className="text-[8.5px] md:text-[9.5px] leading-none">
+                {isAttack ? 'PROFOND.' : 'PRESSING'}
+              </span>
+            </span>
           </button>
 
-          {/* 4h (LOWER-RIGHT): PASSE */}
+          {/* SLOT 3 — BOTTOM-LEFT (BLUE): PASSE [ATTACK] <-> SÉLECT. [DEFENSE] */}
           <button
             type="button"
-            aria-label="Passe"
-            data-testid="touch-btn-pass"
+            aria-label={isAttack ? 'Passe' : 'Sélectionner joueur'}
+            data-testid="touch-btn-lower-left"
+            data-action={isAttack ? 'pass' : 'select'}
             onPointerDown={(e) => {
               e.preventDefault();
-              inputManager.triggerPass();
+              if (isAttack) {
+                inputManager.triggerPass();
+              } else {
+                inputManager.triggerSwitch();
+              }
             }}
-            className="absolute left-[79.4%] top-[67%] -translate-x-1/2 -translate-y-1/2 w-[48px] h-[48px] md:w-[54px] md:h-[54px] rounded-full bg-[#09121e]/65 active:bg-sky-500/85 border-2 border-sky-400/85 text-white font-display font-extrabold text-[10px] md:text-[11px] tracking-wider uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer"
+            className={`absolute left-[22%] top-[79%] -translate-x-1/2 -translate-y-1/2 overflow-hidden w-[56px] h-[56px] md:w-[64px] md:h-[64px] rounded-full border-2 text-white font-display font-extrabold tracking-wide uppercase flex flex-col items-center justify-center shadow-[0_6px_18px_rgba(0,0,0,0.45)] touch-none cursor-pointer transition-all duration-150 ease-out ${transitionScaleClass} ${
+              isAttack
+                ? 'bg-sky-950/65 border-sky-400/95 active:bg-sky-500/85 active:scale-95'
+                : 'bg-indigo-950/68 border-sky-300/90 active:bg-indigo-500/85 active:scale-95'
+            }`}
           >
-            <span className="leading-none">PASSE</span>
-            <span className="text-[7px] text-white/75 font-sans leading-none mt-0.5">K</span>
+            <span className="absolute inset-1 rounded-full border border-white/15 pointer-events-none" />
+            <span className="relative z-10 flex flex-col items-center justify-center">
+              {isAttack ? (
+                <ArrowUpRight className="w-3.5 h-3.5 md:w-4 md:h-4 text-sky-200 mb-0.5" />
+              ) : (
+                <RefreshCw className="w-3.5 h-3.5 md:w-4 md:h-4 text-indigo-200 mb-0.5" />
+              )}
+              <span className="text-[9.5px] md:text-[10.5px] leading-none">
+                {isAttack ? 'PASSE' : 'SÉLECT.'}
+              </span>
+            </span>
           </button>
 
-          {/* 6h (BOTTOM): SPRINT */}
+          {/* SLOT 4 — BOTTOM-RIGHT ANCHOR (GREEN): SPRINT [ATTACK] <-> DÉFENSE [DEFENSE] */}
           <button
             type="button"
-            aria-label="Sprint"
-            data-testid="touch-btn-sprint"
+            aria-label={isAttack ? 'Sprint' : 'Défense'}
+            data-testid="touch-btn-bottom"
+            data-action={isAttack ? 'sprint' : 'defense'}
             onPointerDown={(e) => {
               e.preventDefault();
               if (sprintPointerId.current !== null) return;
@@ -243,63 +359,33 @@ export function TouchControls({ inputManager, hasBall, shotCharge }: TouchContro
                 releaseSprint();
               }
             }}
-            className={`absolute left-[50%] top-[84%] -translate-x-1/2 -translate-y-1/2 w-[48px] h-[48px] md:w-[54px] md:h-[54px] rounded-full border-2 font-display font-extrabold text-[10px] md:text-[11px] tracking-wider uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer ${
+            className={`absolute left-[76%] top-[76%] -translate-x-1/2 -translate-y-1/2 overflow-hidden w-[68px] h-[68px] md:w-[78px] md:h-[78px] rounded-full border-2 font-display font-extrabold tracking-wider uppercase flex flex-col items-center justify-center shadow-[0_8px_22px_rgba(0,0,0,0.5)] touch-none cursor-pointer transition-all duration-150 ease-out ${transitionScaleClass} ${
               sprintHeld
-                ? 'bg-emerald-500/85 border-white text-slate-950 scale-95'
-                : 'bg-[#09121e]/64 border-white/45 text-white active:bg-emerald-500/80'
+                ? 'bg-emerald-400/90 border-white text-slate-950 scale-95'
+                : isAttack
+                  ? 'bg-emerald-950/68 border-emerald-400/95 text-white active:bg-emerald-500/85'
+                  : 'bg-teal-950/68 border-emerald-300/90 text-white active:bg-teal-500/85'
             }`}
           >
-            <span className="leading-none">SPRINT</span>
-            <span className="text-[7px] opacity-75 font-sans leading-none mt-0.5">SHIFT</span>
-          </button>
-
-          {/* 8h (LOWER-LEFT): CHANGER */}
-          <button
-            type="button"
-            aria-label="Switch Player"
-            data-testid="touch-btn-switch"
-            onPointerDown={(e) => {
-              e.preventDefault();
-              inputManager.triggerSwitch();
-            }}
-            className="absolute left-[20.6%] top-[67%] -translate-x-1/2 -translate-y-1/2 w-[48px] h-[48px] md:w-[54px] md:h-[54px] rounded-full bg-[#09121e]/62 active:bg-indigo-500/80 border-2 border-indigo-400/70 text-white font-display font-bold text-[8px] md:text-[9px] tracking-wide uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer"
-          >
-            <span className="leading-none">CHANGER</span>
-            <span className="text-[7px] text-white/70 font-sans leading-none mt-0.5">Q</span>
-          </button>
-
-          {/* 10h (UPPER-LEFT): DÉFENSE / PRESSION */}
-          <button
-            type="button"
-            aria-label="Défense / Pression"
-            data-testid="touch-btn-defense"
-            onPointerDown={(e) => {
-              e.preventDefault();
-              if (pressPointerId.current !== null) return;
-              pressPointerId.current = e.pointerId;
-              safeSetPointerCapture(e.currentTarget, e.pointerId);
-              setPressHeld(true);
-              inputManager.triggerTackle();
-              inputManager.setTouchPress(true);
-            }}
-            onPointerUp={(e) => {
-              if (pressPointerId.current === e.pointerId) {
-                releasePress();
-              }
-            }}
-            onPointerCancel={(e) => {
-              if (pressPointerId.current === e.pointerId) {
-                releasePress();
-              }
-            }}
-            className={`absolute left-[20.6%] top-[33%] -translate-x-1/2 -translate-y-1/2 w-[48px] h-[48px] md:w-[54px] md:h-[54px] rounded-full border-2 font-display font-bold text-[9px] md:text-[10px] tracking-wide uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer ${
-              pressHeld
-                ? 'bg-amber-500/85 border-white text-slate-950 scale-95'
-                : 'bg-[#09121e]/64 border-amber-400/75 text-white active:bg-amber-500/80'
-            }`}
-          >
-            <span className="leading-none">DÉFENSE</span>
-            <span className="text-[7px] opacity-75 font-sans leading-none mt-0.5">T</span>
+            <span className="absolute inset-1.5 rounded-full border border-white/15 pointer-events-none" />
+            <span className="relative z-10 flex flex-col items-center justify-center">
+              {isAttack ? (
+                <ChevronsUp
+                  className={`w-4 h-4 md:w-5 md:h-5 mb-0.5 ${
+                    sprintHeld ? 'text-slate-950' : 'text-emerald-200'
+                  }`}
+                />
+              ) : (
+                <Shield
+                  className={`w-4 h-4 md:w-5 md:h-5 mb-0.5 ${
+                    sprintHeld ? 'text-slate-950' : 'text-teal-200'
+                  }`}
+                />
+              )}
+              <span className="text-[10px] md:text-[11px] leading-none">
+                {isAttack ? 'SPRINT' : 'DÉFENSE'}
+              </span>
+            </span>
           </button>
         </div>
       </div>

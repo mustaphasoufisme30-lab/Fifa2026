@@ -9,6 +9,11 @@ import {
 import { computeCrowdIntensity } from '../audio/crowdLogic';
 import { soundEngine } from '../audio/soundEngine';
 import {
+  ControlModeState,
+  createControlModeState,
+  stepControlMode,
+} from '../controls/controlMode';
+import {
   BALL_RADIUS,
   DRIBBLE_CONTROL_RADIUS,
   DRIBBLE_OFFSET_DIST,
@@ -141,6 +146,35 @@ export class MatchEngine {
   private gkDiveReactionTimer: Map<string, number> = new Map();
   private lastHomeInputDir = { x: 0, z: 0 };
   private lastAwayInputDir = { x: 0, z: 0 };
+  private controlModeState: ControlModeState = createControlModeState('ATTACK');
+
+  private resolveBallOwnerTeam(): TeamSide | null {
+    if (!this.ball.ownerId) return null;
+    const owner = this.players.find((p) => p.id === this.ball.ownerId);
+    return owner ? owner.team : null;
+  }
+
+  private resetControlModeForKickoff(): void {
+    const initialMode = this.kickoffTeam === this.localSide ? 'ATTACK' : 'DEFENSE';
+    this.controlModeState = createControlModeState(initialMode);
+  }
+
+  private updateControlMode(dtSeconds: number): boolean {
+    const result = stepControlMode(
+      this.controlModeState,
+      {
+        phase: this.phase,
+        localTeam: this.localSide,
+        ballOwnerTeam: this.resolveBallOwnerTeam(),
+        lastTouchTeam: this.ball.lastTouchTeam,
+        setPieceTeam: this.setPiece?.team ?? null,
+        kickoffTeam: this.kickoffTeam,
+      },
+      dtSeconds * 1000,
+    );
+    this.controlModeState = result.state;
+    return result.changed;
+  }
 
   public getShotCharge(side: TeamSide = this.localSide): number {
     return side === 'away' ? this.awayShotCharge : this.shotCharge;
@@ -343,6 +377,7 @@ export class MatchEngine {
     this.awayShotCharge = 0;
     this.stats = this.createEmptyStats();
     this.rebuildTeams();
+    this.resetControlModeForKickoff();
     if (!this.isOnlineClient) {
       this.emitSound({ type: 'whistle', pattern: 'short' });
     }
@@ -369,6 +404,7 @@ export class MatchEngine {
       this.kickoffTeam,
     );
     this.ensureControlledPlayers();
+    this.resetControlModeForKickoff();
     this.emitSound({ type: 'whistle', pattern: 'short' });
     this.emitHudSnapshot();
   }
@@ -521,7 +557,21 @@ export class MatchEngine {
       }
     }
 
+    const wasFirstSnapshot = !this.hasReceivedNetSnapshot;
     this.hasReceivedNetSnapshot = true;
+
+    if (wasFirstSnapshot) {
+      const ownerTeam = this.resolveBallOwnerTeam();
+      const firstTeam =
+        this.phase === 'setpiece' && this.setPiece
+          ? this.setPiece.team
+          : ownerTeam ?? this.ball.lastTouchTeam ?? this.kickoffTeam;
+      this.controlModeState = createControlModeState(
+        firstTeam === this.localSide ? 'ATTACK' : 'DEFENSE',
+      );
+    } else {
+      this.updateControlMode(0);
+    }
 
     for (const ev of snapshot.events) {
       this.playSoundEventLocally(ev);
@@ -578,6 +628,10 @@ export class MatchEngine {
       p.facingAngle = lerpAngle(p.facingAngle, target.facingAngle, Math.min(1, 16 * dt));
       const speed = Math.hypot(p.velocity.x, p.velocity.z);
       p.animPhase += speed * dt * 2.2;
+    }
+
+    if (this.updateControlMode(dt)) {
+      this.emitHudSnapshot();
     }
   }
 
@@ -690,6 +744,7 @@ export class MatchEngine {
           'away',
         );
         this.ensureControlledPlayers();
+        this.resetControlModeForKickoff();
         this.emitSound({ type: 'whistle', pattern: 'short' });
         this.emitHudSnapshot();
       }
@@ -923,9 +978,11 @@ export class MatchEngine {
       this.replayRecorder.record(this.ball, this.players, dt);
     }
 
+    const controlModeChanged = this.updateControlMode(dt);
+
     this.hudEmitAccumulator += dt;
     const hudInterval = this.shotCharge > 0 || this.awayShotCharge > 0 ? 0.04 : 0.1;
-    if (this.hudEmitAccumulator >= hudInterval) {
+    if (controlModeChanged || this.hudEmitAccumulator >= hudInterval) {
       this.hudEmitAccumulator = 0;
       soundEngine.updateCrowdIntensity(
         computeCrowdIntensity({
@@ -1453,6 +1510,7 @@ export class MatchEngine {
     } else if (type === 'corner') {
       this.emitSound({ type: 'crowd', reaction: 'applause' });
     }
+    this.updateControlMode(0);
     this.emitHudSnapshot();
   }
 
@@ -1754,6 +1812,7 @@ export class MatchEngine {
         controlled?.hasBall || (this.phase === 'setpiece' && this.setPiece?.team === this.localSide)
           ? localCharge
           : 0,
+      controlMode: this.controlModeState.mode,
       cameraMode: this.cameraMode,
       isReplaying: this.isReplaying,
       setPieceBanner,

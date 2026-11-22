@@ -285,6 +285,8 @@ export interface RadarDot {
   isControlled: boolean;
 }
 
+export type ControlPadMode = 'ATTACK' | 'DEFENSE';
+
 export interface MatchHudSnapshot {
   shellState: GameShellState;
   phase: MatchPhase;
@@ -305,6 +307,7 @@ export interface MatchHudSnapshot {
   controlledStamina: number;
   controlledHasBall: boolean;
   controlledShotCharge: number; // 0..1
+  controlMode: ControlPadMode;
   cameraMode: CameraMode;
   isReplaying: boolean;
   setPieceBanner: {

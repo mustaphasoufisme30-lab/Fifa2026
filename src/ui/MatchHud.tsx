@@ -338,6 +338,7 @@ export function MatchHud({
           inputManager={inputManager}
           hasBall={snapshot.controlledHasBall}
           shotCharge={snapshot.controlledShotCharge}
+          controlMode={snapshot.controlMode}
         />
       )}
 

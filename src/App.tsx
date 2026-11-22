@@ -266,6 +266,7 @@ export default function App() {
     controlledStamina: 100,
     controlledHasBall: false,
     controlledShotCharge: 0,
+    controlMode: 'ATTACK',
     cameraMode: saved.settings.cameraMode,
     isReplaying: false,
     setPieceBanner: null,

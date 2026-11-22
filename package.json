@@ -7,7 +7,7 @@
     "dev": "tsx server.ts",
     "start": "NODE_ENV=production node server.js",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=server.js",
-    "test": "tsx --test src/physics/pitchPhysics.test.ts src/game/rules.test.ts src/ai/basicAi.test.ts src/players/customPlayer.test.ts src/game/tournament.test.ts src/core/networkGuard.test.ts src/teams/matchup.test.ts src/multiplayer/roomManager.test.ts firestore.rules.test.ts",
+    "test": "tsx --test src/physics/pitchPhysics.test.ts src/game/rules.test.ts src/ai/basicAi.test.ts src/players/customPlayer.test.ts src/game/tournament.test.ts src/core/networkGuard.test.ts src/teams/matchup.test.ts src/multiplayer/roomManager.test.ts src/controls/controlMode.test.ts firestore.rules.test.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"

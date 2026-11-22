@@ -2303,6 +2303,114 @@ var SoundEngine = class {
 };
 var soundEngine = new SoundEngine();
 
+// src/controls/controlMode.ts
+var CONTROL_MODE_CONFIRM_MS = 150;
+var CONTROL_MODE_INFLIGHT_WEIGHT = 0.55;
+var CONTROL_MODE_COOLDOWN_MS = 280;
+function createControlModeState(initialMode = "ATTACK") {
+  return {
+    mode: initialMode,
+    pendingMode: null,
+    pendingElapsedMs: 0,
+    cooldownRemainingMs: 0
+  };
+}
+function resolveImmediateControlMode(input) {
+  if (input.phase === "kickoff") {
+    return input.kickoffTeam === input.localTeam ? "ATTACK" : "DEFENSE";
+  }
+  if (input.phase === "setpiece" && input.setPieceTeam !== null) {
+    return input.setPieceTeam === input.localTeam ? "ATTACK" : "DEFENSE";
+  }
+  return null;
+}
+function stepControlMode(prev, input, dtMs, confirmWindowMs = CONTROL_MODE_CONFIRM_MS, cooldownMs = CONTROL_MODE_COOLDOWN_MS) {
+  const safeDtMs = Math.max(0, dtMs);
+  const nextCooldown = Math.max(0, prev.cooldownRemainingMs - safeDtMs);
+  const immediateMode = resolveImmediateControlMode(input);
+  if (immediateMode !== null) {
+    const changed = immediateMode !== prev.mode;
+    return {
+      state: {
+        mode: immediateMode,
+        pendingMode: null,
+        pendingElapsedMs: 0,
+        cooldownRemainingMs: 0
+      },
+      changed
+    };
+  }
+  if (input.phase !== "live") {
+    return {
+      state: {
+        mode: prev.mode,
+        pendingMode: null,
+        pendingElapsedMs: 0,
+        cooldownRemainingMs: nextCooldown
+      },
+      changed: false
+    };
+  }
+  const observedTeam = input.ballOwnerTeam ?? input.lastTouchTeam;
+  if (observedTeam === null) {
+    return {
+      state: {
+        mode: prev.mode,
+        pendingMode: null,
+        pendingElapsedMs: 0,
+        cooldownRemainingMs: nextCooldown
+      },
+      changed: false
+    };
+  }
+  const desiredMode = observedTeam === input.localTeam ? "ATTACK" : "DEFENSE";
+  if (desiredMode === prev.mode) {
+    return {
+      state: {
+        mode: prev.mode,
+        pendingMode: null,
+        pendingElapsedMs: 0,
+        cooldownRemainingMs: nextCooldown
+      },
+      changed: false
+    };
+  }
+  if (nextCooldown > 0) {
+    return {
+      state: {
+        mode: prev.mode,
+        pendingMode: desiredMode,
+        pendingElapsedMs: 0,
+        cooldownRemainingMs: nextCooldown
+      },
+      changed: false
+    };
+  }
+  const weight = input.ballOwnerTeam !== null ? 1 : CONTROL_MODE_INFLIGHT_WEIGHT;
+  const weightedDtMs = safeDtMs * weight;
+  const accumulatedMs = prev.pendingMode === desiredMode ? prev.pendingElapsedMs + weightedDtMs : weightedDtMs;
+  if (accumulatedMs >= confirmWindowMs) {
+    return {
+      state: {
+        mode: desiredMode,
+        pendingMode: null,
+        pendingElapsedMs: 0,
+        cooldownRemainingMs: cooldownMs
+      },
+      changed: true
+    };
+  }
+  return {
+    state: {
+      mode: prev.mode,
+      pendingMode: desiredMode,
+      pendingElapsedMs: accumulatedMs,
+      cooldownRemainingMs: 0
+    },
+    changed: false
+  };
+}
+
 // src/game/replayRecorder.ts
 var MAX_REPLAY_FRAMES = 108;
 var SAMPLE_INTERVAL = 1 / 30;
@@ -2442,6 +2550,7 @@ var MatchEngine = class {
     this.gkDiveReactionTimer = /* @__PURE__ */ new Map();
     this.lastHomeInputDir = { x: 0, z: 0 };
     this.lastAwayInputDir = { x: 0, z: 0 };
+    this.controlModeState = createControlModeState("ATTACK");
     this.homeTeam = homeTeam;
     this.awayTeam = awayTeam;
     this.homeFormation = homeFormation;
@@ -2455,6 +2564,31 @@ var MatchEngine = class {
     this.replayBallProxy = this.createEmptyBall();
     this.stats = this.createEmptyStats();
     this.rebuildTeams();
+  }
+  resolveBallOwnerTeam() {
+    if (!this.ball.ownerId) return null;
+    const owner = this.players.find((p) => p.id === this.ball.ownerId);
+    return owner ? owner.team : null;
+  }
+  resetControlModeForKickoff() {
+    const initialMode = this.kickoffTeam === this.localSide ? "ATTACK" : "DEFENSE";
+    this.controlModeState = createControlModeState(initialMode);
+  }
+  updateControlMode(dtSeconds) {
+    const result = stepControlMode(
+      this.controlModeState,
+      {
+        phase: this.phase,
+        localTeam: this.localSide,
+        ballOwnerTeam: this.resolveBallOwnerTeam(),
+        lastTouchTeam: this.ball.lastTouchTeam,
+        setPieceTeam: this.setPiece?.team ?? null,
+        kickoffTeam: this.kickoffTeam
+      },
+      dtSeconds * 1e3
+    );
+    this.controlModeState = result.state;
+    return result.changed;
   }
   getShotCharge(side = this.localSide) {
     return side === "away" ? this.awayShotCharge : this.shotCharge;
@@ -2604,6 +2738,7 @@ var MatchEngine = class {
     this.awayShotCharge = 0;
     this.stats = this.createEmptyStats();
     this.rebuildTeams();
+    this.resetControlModeForKickoff();
     if (!this.isOnlineClient) {
       this.emitSound({ type: "whistle", pattern: "short" });
     }
@@ -2628,6 +2763,7 @@ var MatchEngine = class {
       this.kickoffTeam
     );
     this.ensureControlledPlayers();
+    this.resetControlModeForKickoff();
     this.emitSound({ type: "whistle", pattern: "short" });
     this.emitHudSnapshot();
   }
@@ -2761,7 +2897,17 @@ var MatchEngine = class {
         p.facingAngle = np.facingAngle;
       }
     }
+    const wasFirstSnapshot = !this.hasReceivedNetSnapshot;
     this.hasReceivedNetSnapshot = true;
+    if (wasFirstSnapshot) {
+      const ownerTeam = this.resolveBallOwnerTeam();
+      const firstTeam = this.phase === "setpiece" && this.setPiece ? this.setPiece.team : ownerTeam ?? this.ball.lastTouchTeam ?? this.kickoffTeam;
+      this.controlModeState = createControlModeState(
+        firstTeam === this.localSide ? "ATTACK" : "DEFENSE"
+      );
+    } else {
+      this.updateControlMode(0);
+    }
     for (const ev of snapshot.events) {
       this.playSoundEventLocally(ev);
       if (ev.type === "post") {
@@ -2810,6 +2956,9 @@ var MatchEngine = class {
       p.facingAngle = lerpAngle(p.facingAngle, target.facingAngle, Math.min(1, 16 * dt));
       const speed = Math.hypot(p.velocity.x, p.velocity.z);
       p.animPhase += speed * dt * 2.2;
+    }
+    if (this.updateControlMode(dt)) {
+      this.emitHudSnapshot();
     }
   }
   /**
@@ -2901,6 +3050,7 @@ var MatchEngine = class {
           "away"
         );
         this.ensureControlledPlayers();
+        this.resetControlModeForKickoff();
         this.emitSound({ type: "whistle", pattern: "short" });
         this.emitHudSnapshot();
       }
@@ -3086,9 +3236,10 @@ var MatchEngine = class {
     if (!this.awayHumanControl) {
       this.replayRecorder.record(this.ball, this.players, dt);
     }
+    const controlModeChanged = this.updateControlMode(dt);
     this.hudEmitAccumulator += dt;
     const hudInterval = this.shotCharge > 0 || this.awayShotCharge > 0 ? 0.04 : 0.1;
-    if (this.hudEmitAccumulator >= hudInterval) {
+    if (controlModeChanged || this.hudEmitAccumulator >= hudInterval) {
       this.hudEmitAccumulator = 0;
       soundEngine.updateCrowdIntensity(
         computeCrowdIntensity({
@@ -3544,6 +3695,7 @@ var MatchEngine = class {
     } else if (type === "corner") {
       this.emitSound({ type: "crowd", reaction: "applause" });
     }
+    this.updateControlMode(0);
     this.emitHudSnapshot();
   }
   tryPickupLooseBall() {
@@ -3782,6 +3934,7 @@ var MatchEngine = class {
       controlledStamina: Math.round(controlled?.stamina ?? 100),
       controlledHasBall: controlled?.hasBall ?? false,
       controlledShotCharge: controlled?.hasBall || this.phase === "setpiece" && this.setPiece?.team === this.localSide ? localCharge : 0,
+      controlMode: this.controlModeState.mode,
       cameraMode: this.cameraMode,
       isReplaying: this.isReplaying,
       setPieceBanner,
@@ -4955,22 +5108,54 @@ var OnlineRoomManager = class {
     const room = this.rooms.get(existingCode);
     if (!room) return;
     const leaving = room.players.find((p) => p.clientId === clientId);
+    const wasPlaying = room.status === "playing";
+    const finalStats = room.engine ? { ...room.engine.stats } : null;
+    const roomBeforeLeave = wasPlaying ? this.toRoomSnapshot(room) : null;
     room.players = room.players.filter((p) => p.clientId !== clientId);
     if (room.players.length === 0) {
+      room.engine = null;
       this.rooms.delete(existingCode);
       return;
     }
-    if (room.status === "playing") {
-      room.status = "waiting";
+    if (wasPlaying) {
+      room.status = "finished";
       room.engine = null;
       room.pausedForDisconnect = false;
+      const stoppedRoom = {
+        ...roomBeforeLeave ?? this.toRoomSnapshot(room),
+        status: "finished"
+      };
+      const fallbackStats = finalStats ?? {
+        homeScore: 0,
+        awayScore: 0,
+        homeShots: 0,
+        awayShots: 0,
+        homePasses: 0,
+        awayPasses: 0,
+        homeSaves: 0,
+        awaySaves: 0,
+        homeCorners: 0,
+        awayCorners: 0,
+        homeFouls: 0,
+        awayFouls: 0,
+        homePossessionSeconds: 0,
+        awayPossessionSeconds: 0,
+        lastScorerName: null,
+        lastScorerTeam: null,
+        lastGoalMinute: null
+      };
+      const leavingName = leaving?.nickname ?? "Votre adversaire";
       for (const other of room.players) {
         other.ready = false;
         other.transport?.send({
-          type: "opponent:disconnected",
-          message: `${leaving?.nickname ?? "Adversaire"} a quitt\xE9 la partie.`
+          type: "match:finished",
+          stats: fallbackStats,
+          room: stoppedRoom,
+          abortedByNickname: leavingName
         });
       }
+      this.broadcastRoomState(room);
+      return;
     }
     room.players[0].side = "home";
     this.broadcastRoomState(room);

@@ -439,8 +439,12 @@ export default function App() {
   }, []);
 
   const finalizeFirestoreOnlineMatch = useCallback(
-    (finalStats: MatchStats) => {
+    (finalStats: MatchStats, abortedBy: string | null = null) => {
       inputManager.clearAll();
+      if (engineRef.current) {
+        engineRef.current.shellState = 'gameover';
+      }
+      setHudSnapshot((prev) => ({ ...prev, stats: { ...finalStats } }));
       const room = onlineRoomRef.current;
       const homeSlot = room?.players.find((p) => p.side === 'home');
       const awaySlot = room?.players.find((p) => p.side === 'away');
@@ -450,6 +454,7 @@ export default function App() {
         homePlayerName: homeSlot?.nickname ?? 'Joueur 1',
         awayPlayerName: awaySlot?.nickname ?? 'Joueur 2',
         yourSide,
+        abortedBy,
       });
       setOpponentDisconnectedMsg(null);
       setShellState('gameover');
@@ -467,15 +472,17 @@ export default function App() {
           }).catch(() => {});
         }
 
-        const myGoals = yourSide === 'home' ? finalStats.homeScore : finalStats.awayScore;
-        const oppGoals = yourSide === 'home' ? finalStats.awayScore : finalStats.homeScore;
-        const outcome = myGoals > oppGoals ? 'win' : myGoals < oppGoals ? 'loss' : 'draw';
-        void recordOnlinePlayerMatchStats(
-          user.uid,
-          onlineNicknameRef.current,
-          myGoals,
-          outcome,
-        ).catch(() => {});
+        if (!abortedBy) {
+          const myGoals = yourSide === 'home' ? finalStats.homeScore : finalStats.awayScore;
+          const oppGoals = yourSide === 'home' ? finalStats.awayScore : finalStats.homeScore;
+          const outcome = myGoals > oppGoals ? 'win' : myGoals < oppGoals ? 'loss' : 'draw';
+          void recordOnlinePlayerMatchStats(
+            user.uid,
+            onlineNicknameRef.current,
+            myGoals,
+            outcome,
+          ).catch(() => {});
+        }
       }
     },
     [inputManager],
@@ -644,14 +651,20 @@ export default function App() {
         }
         case 'match:finished': {
           inputManager.clearAll();
+          if (engineRef.current) {
+            engineRef.current.shellState = 'gameover';
+          }
+          setHudSnapshot((prev) => ({ ...prev, stats: { ...msg.stats } }));
           setOnlineRoom(msg.room);
           const homeSlot = msg.room.players.find((p) => p.side === 'home');
           const awaySlot = msg.room.players.find((p) => p.side === 'away');
           const yourSide = onlineSideRef.current;
+          const abortedBy = msg.abortedByNickname ?? null;
           setOnlineMatchSummary({
             homePlayerName: homeSlot?.nickname ?? 'Joueur 1',
             awayPlayerName: awaySlot?.nickname ?? 'Joueur 2',
             yourSide,
+            abortedBy,
           });
           setOpponentDisconnectedMsg(null);
           setShellState('gameover');
@@ -669,15 +682,17 @@ export default function App() {
               }).catch(() => {});
             }
 
-            const myGoals = yourSide === 'home' ? msg.stats.homeScore : msg.stats.awayScore;
-            const oppGoals = yourSide === 'home' ? msg.stats.awayScore : msg.stats.homeScore;
-            const outcome = myGoals > oppGoals ? 'win' : myGoals < oppGoals ? 'loss' : 'draw';
-            void recordOnlinePlayerMatchStats(
-              user.uid,
-              onlineNicknameRef.current,
-              myGoals,
-              outcome,
-            ).catch(() => {});
+            if (!abortedBy) {
+              const myGoals = yourSide === 'home' ? msg.stats.homeScore : msg.stats.awayScore;
+              const oppGoals = yourSide === 'home' ? msg.stats.awayScore : msg.stats.homeScore;
+              const outcome = myGoals > oppGoals ? 'win' : myGoals < oppGoals ? 'loss' : 'draw';
+              void recordOnlinePlayerMatchStats(
+                user.uid,
+                onlineNicknameRef.current,
+                myGoals,
+                outcome,
+              ).catch(() => {});
+            }
           }
           break;
         }
@@ -766,7 +781,7 @@ export default function App() {
     return unsubscribe;
   }, [authUser, launchFirestoreOnlineMatch, onlineRoom?.roomCode, shellState]);
 
-  // Live Firestore match state / guest input / rematch sync when running in Firestore fallback mode
+  // Live Firestore match state / guest input / rematch / opponent-leave sync
   useEffect(() => {
     const roomCode = onlineRoom?.roomCode;
     if (!isOnlineMatch || onlineTransport !== 'firestore' || !roomCode || !authUser) return;
@@ -782,9 +797,48 @@ export default function App() {
       }
     });
 
-    if (shellState !== 'playing') {
+    if (shellState !== 'playing' && shellState !== 'paused') {
       return unsubRematch;
     }
+
+    // Watch room status so if the opponent quits the salon mid-match, stop immediately here too
+    const unsubRoomWatch = subscribeFirestoreRoom(
+      roomCode,
+      (doc) => {
+        if (firestoreMatchFinishedSentRef.current) return;
+        const engine = engineRef.current;
+        if (!doc || (doc.status === 'finished' && engine?.phase !== 'fulltime')) {
+          firestoreMatchFinishedSentRef.current = true;
+          const oppSlot = onlineRoomRef.current?.players.find(
+            (p) => p.side !== onlineSideRef.current,
+          );
+          const oppName = oppSlot?.nickname ?? 'Votre adversaire';
+          const currentStats: MatchStats = engine
+            ? { ...engine.stats }
+            : {
+                homeScore: doc?.homeScore ?? 0,
+                awayScore: doc?.awayScore ?? 0,
+                homeShots: 0,
+                awayShots: 0,
+                homePasses: 0,
+                awayPasses: 0,
+                homeSaves: 0,
+                awaySaves: 0,
+                homeCorners: 0,
+                awayCorners: 0,
+                homeFouls: 0,
+                awayFouls: 0,
+                homePossessionSeconds: 0,
+                awayPossessionSeconds: 0,
+                lastScorerName: null,
+                lastScorerTeam: null,
+                lastGoalMinute: null,
+              };
+          finalizeFirestoreOnlineMatch(currentStats, oppName);
+        }
+      },
+      () => {},
+    );
 
     if (onlineSide === 'home') {
       const unsubInput = subscribeFirestoreGuestInput(roomCode, (input, seq) => {
@@ -827,6 +881,7 @@ export default function App() {
 
       return () => {
         unsubRematch();
+        unsubRoomWatch();
         unsubInput();
         window.clearInterval(timer);
       };
@@ -848,6 +903,7 @@ export default function App() {
 
     return () => {
       unsubRematch();
+      unsubRoomWatch();
       unsubState();
     };
   }, [
@@ -860,6 +916,18 @@ export default function App() {
     onlineTransport,
     shellState,
   ]);
+
+  // Notify server cleanly if the user closes/navigates away during an active online match
+  useEffect(() => {
+    if (!isOnlineMatch) return;
+    const handlePageHide = () => {
+      onlineClientRef.current?.send({ type: 'room:leave' });
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+    };
+  }, [isOnlineMatch]);
 
   // Keep body data-state & online status mirrored
   useEffect(() => {
@@ -1257,6 +1325,20 @@ export default function App() {
     const room = onlineRoomRef.current;
     if (room && room.status === 'waiting' && onlineSide === 'home') {
       void deleteWaitingFirestoreRoom(room.roomCode);
+    } else if (room && isOnlineMatchRef.current && !firestoreMatchFinishedSentRef.current) {
+      firestoreMatchFinishedSentRef.current = true;
+      const homeSlot = room.players.find((p) => p.side === 'home');
+      const awaySlot = room.players.find((p) => p.side === 'away');
+      if (homeSlot && awaySlot) {
+        const stats = engineRef.current?.stats;
+        void markFirestoreRoomFinished({
+          roomCode: room.roomCode,
+          homeScore: stats?.homeScore ?? 0,
+          awayScore: stats?.awayScore ?? 0,
+          hostUid: homeSlot.uid,
+          guestUid: awaySlot.uid,
+        }).catch(() => {});
+      }
     }
     onlineClientRef.current?.send({ type: 'room:leave' });
     onlineClientRef.current?.setActiveSession(null);

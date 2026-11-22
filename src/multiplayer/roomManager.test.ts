@@ -322,4 +322,58 @@ describe('OnlineRoomManager authoritative 1v1 multiplayer', () => {
     assert.ok(hostClient.lastOfType('match:start'), 'Host should start hydrated match');
     assert.ok(guestClient.lastOfType('match:start'), 'Guest should receive match:start');
   });
+
+  it('stops an active match immediately for the remaining player when the other user leaves the room', () => {
+    const manager = new OnlineRoomManager();
+    const host = createMockClient('c_leave_host');
+    const guest = createMockClient('c_leave_guest');
+    manager.addClient(host);
+    manager.addClient(guest);
+    manager.authenticateClient('c_leave_host', 'uid_leave_host');
+    manager.authenticateClient('c_leave_guest', 'uid_leave_guest');
+
+    manager.handleMessage('c_leave_host', {
+      type: 'room:create',
+      roomCode: 'Q9W42',
+      nickname: 'Mustapha',
+      teamId: 'aurelia',
+      formation: '4-3-3',
+      halfDurationSeconds: 120,
+    });
+    manager.handleMessage('c_leave_guest', {
+      type: 'room:join',
+      roomCode: 'Q9W42',
+      nickname: 'Karim',
+      teamId: 'nordic',
+      formation: '4-4-2',
+    });
+    manager.handleMessage('c_leave_host', { type: 'room:start' });
+
+    for (let i = 0; i < 6; i++) {
+      manager.stepAllMatches(1 / 30);
+    }
+
+    const statesBeforeLeave = host.received.filter((m) => m.type === 'match:state').length;
+
+    // Guest explicitly leaves the room mid-match
+    manager.handleMessage('c_leave_guest', { type: 'room:leave' });
+
+    const finished = host.lastOfType('match:finished');
+    assert.ok(finished, 'Remaining player must receive match:finished when opponent leaves the room');
+    assert.equal(finished.abortedByNickname, 'Karim');
+    assert.equal(finished.room.status, 'finished');
+    assert.equal(manager.getRoomSnapshot('Q9W42')?.status, 'finished');
+
+    // Stepping server ticks afterwards must NOT keep advancing the stopped match
+    for (let i = 0; i < 10; i++) {
+      manager.stepAllMatches(1 / 30);
+    }
+    const statesAfterLeave = host.received.filter((m) => m.type === 'match:state').length;
+    assert.equal(
+      statesAfterLeave,
+      statesBeforeLeave,
+      'Match simulation must completely stop once a player leaves the room',
+    );
+  });
 });
+

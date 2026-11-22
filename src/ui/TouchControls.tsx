@@ -138,48 +138,16 @@ export function TouchControls({ inputManager, hasBall, shotCharge }: TouchContro
         />
       </div>
 
-      {/* Right Compact Action Zone: Secondary pair (LOB / CHANGER) + Main Circular Diamond Pad */}
-      <div className="flex items-end gap-2 md:gap-2.5 pointer-events-auto touch-none">
-        {/* Compact secondary buttons adjacent to upper-left of main circle */}
-        <div className="flex flex-col gap-2 mb-12 md:mb-14">
-          <button
-            type="button"
-            aria-label="Lob Pass"
-            data-testid="touch-btn-lob"
-            onPointerDown={(e) => {
-              e.preventDefault();
-              inputManager.triggerLob();
-            }}
-            className="w-10 h-10 md:w-11 md:h-11 rounded-full bg-[#09121e]/52 active:bg-sky-500/80 border border-white/30 text-white font-display font-bold text-[10px] md:text-[11px] tracking-wider uppercase flex flex-col items-center justify-center shadow-md touch-none cursor-pointer"
-          >
-            <span className="leading-none">LOB</span>
-            <span className="text-[7px] text-white/65 font-sans leading-none mt-0.5">L</span>
-          </button>
-
-          <button
-            type="button"
-            aria-label="Switch Player"
-            data-testid="touch-btn-switch"
-            onPointerDown={(e) => {
-              e.preventDefault();
-              inputManager.triggerSwitch();
-            }}
-            className="w-10 h-10 md:w-11 md:h-11 rounded-full bg-[#09121e]/52 active:bg-indigo-500/80 border border-white/30 text-white font-display font-bold text-[8px] md:text-[9px] tracking-wide uppercase flex flex-col items-center justify-center shadow-md touch-none cursor-pointer"
-          >
-            <span className="leading-none">CHANGER</span>
-            <span className="text-[7px] text-white/65 font-sans leading-none mt-0.5">Q</span>
-          </button>
-        </div>
-
-        {/* Main Circular Action Pad: Top=TIR, Right=PASSE, Left=DÉFENSE, Bottom=SPRINT */}
+      {/* Right Compact Circular Action Pad (all 6 actions unified around one thumb ring) */}
+      <div className="flex items-end pointer-events-auto touch-none">
         <div
           data-testid="touch-action-circle"
-          className="relative w-[166px] h-[166px] md:w-[190px] md:h-[190px] rounded-full bg-[#09121e]/20 border border-white/15 shrink-0"
+          className="relative w-[176px] h-[176px] md:w-[200px] md:h-[200px] rounded-full bg-[#09121e]/24 border border-white/18 shrink-0 shadow-lg"
         >
-          {/* Subtle inner guide ring unifying the 4 thumb actions into one circular cluster */}
-          <div className="absolute inset-6 rounded-full border border-white/10 pointer-events-none" />
+          {/* Subtle inner guide ring unifying all 6 thumb actions into one circular cluster */}
+          <div className="absolute inset-7 rounded-full border border-white/10 pointer-events-none" />
 
-          {/* TOP: TIR (Shoot — hold to charge, release to shoot) */}
+          {/* 12h (TOP): TIR (Shoot — hold to charge, release to shoot) */}
           <button
             type="button"
             aria-label="Tir"
@@ -202,12 +170,12 @@ export function TouchControls({ inputManager, hasBall, shotCharge }: TouchContro
                 releaseShoot();
               }
             }}
-            className={`absolute top-0 left-1/2 -translate-x-1/2 overflow-hidden w-[54px] h-[54px] md:w-[60px] md:h-[60px] rounded-full border-2 text-white font-display font-extrabold text-xs md:text-sm tracking-wider uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer ${
+            className={`absolute left-[50%] top-[16%] -translate-x-1/2 -translate-y-1/2 overflow-hidden w-[48px] h-[48px] md:w-[54px] md:h-[54px] rounded-full border-2 text-white font-display font-extrabold text-[11px] md:text-xs tracking-wider uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer ${
               shootHeld
                 ? 'bg-rose-500/85 border-amber-300 scale-95'
                 : hasBall
-                  ? 'bg-[#0b1726]/68 border-emerald-400/90 active:bg-emerald-500/80'
-                  : 'bg-[#09121e]/60 border-white/45 active:bg-rose-500/80'
+                  ? 'bg-[#0b1726]/72 border-emerald-400/90 active:bg-emerald-500/80'
+                  : 'bg-[#09121e]/64 border-white/45 active:bg-rose-500/80'
             }`}
           >
             {shotCharge > 0.02 && (
@@ -217,12 +185,90 @@ export function TouchControls({ inputManager, hasBall, shotCharge }: TouchContro
               />
             )}
             <span className="relative z-10 leading-none">TIR</span>
-            <span className="relative z-10 text-[8px] text-white/75 font-sans leading-none mt-0.5">
+            <span className="relative z-10 text-[7px] text-white/75 font-sans leading-none mt-0.5">
               SPC
             </span>
           </button>
 
-          {/* LEFT: DÉFENSE / PRESSION */}
+          {/* 2h (UPPER-RIGHT): LOB */}
+          <button
+            type="button"
+            aria-label="Lob Pass"
+            data-testid="touch-btn-lob"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              inputManager.triggerLob();
+            }}
+            className="absolute left-[79.4%] top-[33%] -translate-x-1/2 -translate-y-1/2 w-[48px] h-[48px] md:w-[54px] md:h-[54px] rounded-full bg-[#09121e]/62 active:bg-sky-500/80 border-2 border-cyan-300/65 text-white font-display font-bold text-[10px] md:text-[11px] tracking-wider uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer"
+          >
+            <span className="leading-none">LOB</span>
+            <span className="text-[7px] text-white/70 font-sans leading-none mt-0.5">L</span>
+          </button>
+
+          {/* 4h (LOWER-RIGHT): PASSE */}
+          <button
+            type="button"
+            aria-label="Passe"
+            data-testid="touch-btn-pass"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              inputManager.triggerPass();
+            }}
+            className="absolute left-[79.4%] top-[67%] -translate-x-1/2 -translate-y-1/2 w-[48px] h-[48px] md:w-[54px] md:h-[54px] rounded-full bg-[#09121e]/65 active:bg-sky-500/85 border-2 border-sky-400/85 text-white font-display font-extrabold text-[10px] md:text-[11px] tracking-wider uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer"
+          >
+            <span className="leading-none">PASSE</span>
+            <span className="text-[7px] text-white/75 font-sans leading-none mt-0.5">K</span>
+          </button>
+
+          {/* 6h (BOTTOM): SPRINT */}
+          <button
+            type="button"
+            aria-label="Sprint"
+            data-testid="touch-btn-sprint"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              if (sprintPointerId.current !== null) return;
+              sprintPointerId.current = e.pointerId;
+              safeSetPointerCapture(e.currentTarget, e.pointerId);
+              setSprintHeld(true);
+              inputManager.setTouchSprint(true);
+            }}
+            onPointerUp={(e) => {
+              if (sprintPointerId.current === e.pointerId) {
+                releaseSprint();
+              }
+            }}
+            onPointerCancel={(e) => {
+              if (sprintPointerId.current === e.pointerId) {
+                releaseSprint();
+              }
+            }}
+            className={`absolute left-[50%] top-[84%] -translate-x-1/2 -translate-y-1/2 w-[48px] h-[48px] md:w-[54px] md:h-[54px] rounded-full border-2 font-display font-extrabold text-[10px] md:text-[11px] tracking-wider uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer ${
+              sprintHeld
+                ? 'bg-emerald-500/85 border-white text-slate-950 scale-95'
+                : 'bg-[#09121e]/64 border-white/45 text-white active:bg-emerald-500/80'
+            }`}
+          >
+            <span className="leading-none">SPRINT</span>
+            <span className="text-[7px] opacity-75 font-sans leading-none mt-0.5">SHIFT</span>
+          </button>
+
+          {/* 8h (LOWER-LEFT): CHANGER */}
+          <button
+            type="button"
+            aria-label="Switch Player"
+            data-testid="touch-btn-switch"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              inputManager.triggerSwitch();
+            }}
+            className="absolute left-[20.6%] top-[67%] -translate-x-1/2 -translate-y-1/2 w-[48px] h-[48px] md:w-[54px] md:h-[54px] rounded-full bg-[#09121e]/62 active:bg-indigo-500/80 border-2 border-indigo-400/70 text-white font-display font-bold text-[8px] md:text-[9px] tracking-wide uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer"
+          >
+            <span className="leading-none">CHANGER</span>
+            <span className="text-[7px] text-white/70 font-sans leading-none mt-0.5">Q</span>
+          </button>
+
+          {/* 10h (UPPER-LEFT): DÉFENSE / PRESSION */}
           <button
             type="button"
             aria-label="Défense / Pression"
@@ -246,62 +292,14 @@ export function TouchControls({ inputManager, hasBall, shotCharge }: TouchContro
                 releasePress();
               }
             }}
-            className={`absolute left-0 top-1/2 -translate-y-1/2 w-[54px] h-[54px] md:w-[60px] md:h-[60px] rounded-full border-2 font-display font-bold text-[10px] md:text-[11px] tracking-wide uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer ${
+            className={`absolute left-[20.6%] top-[33%] -translate-x-1/2 -translate-y-1/2 w-[48px] h-[48px] md:w-[54px] md:h-[54px] rounded-full border-2 font-display font-bold text-[9px] md:text-[10px] tracking-wide uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer ${
               pressHeld
                 ? 'bg-amber-500/85 border-white text-slate-950 scale-95'
-                : 'bg-[#09121e]/60 border-amber-400/70 text-white active:bg-amber-500/80'
+                : 'bg-[#09121e]/64 border-amber-400/75 text-white active:bg-amber-500/80'
             }`}
           >
             <span className="leading-none">DÉFENSE</span>
-            <span className="text-[8px] opacity-75 font-sans leading-none mt-0.5">T</span>
-          </button>
-
-          {/* RIGHT: PASSE */}
-          <button
-            type="button"
-            aria-label="Passe"
-            data-testid="touch-btn-pass"
-            onPointerDown={(e) => {
-              e.preventDefault();
-              inputManager.triggerPass();
-            }}
-            className="absolute right-0 top-1/2 -translate-y-1/2 w-[54px] h-[54px] md:w-[60px] md:h-[60px] rounded-full bg-[#09121e]/62 active:bg-sky-500/85 border-2 border-sky-400/80 text-white font-display font-extrabold text-[11px] md:text-xs tracking-wider uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer"
-          >
-            <span className="leading-none">PASSE</span>
-            <span className="text-[8px] text-white/75 font-sans leading-none mt-0.5">K</span>
-          </button>
-
-          {/* BOTTOM: SPRINT */}
-          <button
-            type="button"
-            aria-label="Sprint"
-            data-testid="touch-btn-sprint"
-            onPointerDown={(e) => {
-              e.preventDefault();
-              if (sprintPointerId.current !== null) return;
-              sprintPointerId.current = e.pointerId;
-              safeSetPointerCapture(e.currentTarget, e.pointerId);
-              setSprintHeld(true);
-              inputManager.setTouchSprint(true);
-            }}
-            onPointerUp={(e) => {
-              if (sprintPointerId.current === e.pointerId) {
-                releaseSprint();
-              }
-            }}
-            onPointerCancel={(e) => {
-              if (sprintPointerId.current === e.pointerId) {
-                releaseSprint();
-              }
-            }}
-            className={`absolute bottom-0 left-1/2 -translate-x-1/2 w-[54px] h-[54px] md:w-[60px] md:h-[60px] rounded-full border-2 font-display font-extrabold text-[11px] md:text-xs tracking-wider uppercase flex flex-col items-center justify-center shadow-lg touch-none cursor-pointer ${
-              sprintHeld
-                ? 'bg-emerald-500/85 border-white text-slate-950 scale-95'
-                : 'bg-[#09121e]/62 border-white/45 text-white active:bg-emerald-500/80'
-            }`}
-          >
-            <span className="leading-none">SPRINT</span>
-            <span className="text-[7px] opacity-75 font-sans leading-none mt-0.5">SHIFT</span>
+            <span className="text-[7px] opacity-75 font-sans leading-none mt-0.5">T</span>
           </button>
         </div>
       </div>

@@ -344,24 +344,57 @@ export class OnlineRoomManager {
     if (!room) return;
 
     const leaving = room.players.find((p) => p.clientId === clientId);
+    const wasPlaying = room.status === 'playing';
+    const finalStats: MatchStats | null = room.engine ? { ...room.engine.stats } : null;
+    const roomBeforeLeave = wasPlaying ? this.toRoomSnapshot(room) : null;
+
     room.players = room.players.filter((p) => p.clientId !== clientId);
 
     if (room.players.length === 0) {
+      room.engine = null;
       this.rooms.delete(existingCode);
       return;
     }
 
-    if (room.status === 'playing') {
-      room.status = 'waiting';
+    if (wasPlaying) {
+      room.status = 'finished';
       room.engine = null;
       room.pausedForDisconnect = false;
+      const stoppedRoom: OnlineRoomSnapshot = {
+        ...(roomBeforeLeave ?? this.toRoomSnapshot(room)),
+        status: 'finished',
+      };
+      const fallbackStats: MatchStats = finalStats ?? {
+        homeScore: 0,
+        awayScore: 0,
+        homeShots: 0,
+        awayShots: 0,
+        homePasses: 0,
+        awayPasses: 0,
+        homeSaves: 0,
+        awaySaves: 0,
+        homeCorners: 0,
+        awayCorners: 0,
+        homeFouls: 0,
+        awayFouls: 0,
+        homePossessionSeconds: 0,
+        awayPossessionSeconds: 0,
+        lastScorerName: null,
+        lastScorerTeam: null,
+        lastGoalMinute: null,
+      };
+      const leavingName = leaving?.nickname ?? 'Votre adversaire';
       for (const other of room.players) {
         other.ready = false;
         other.transport?.send({
-          type: 'opponent:disconnected',
-          message: `${leaving?.nickname ?? 'Adversaire'} a quitté la partie.`,
+          type: 'match:finished',
+          stats: fallbackStats,
+          room: stoppedRoom,
+          abortedByNickname: leavingName,
         });
       }
+      this.broadcastRoomState(room);
+      return;
     }
 
     room.players[0].side = 'home';

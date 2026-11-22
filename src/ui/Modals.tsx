@@ -26,6 +26,7 @@ export interface OnlineMatchSummary {
   homePlayerName: string;
   awayPlayerName: string;
   yourSide: 'home' | 'away';
+  abortedBy?: string | null;
 }
 
 interface PauseModalProps {
@@ -177,11 +178,13 @@ export function FullTimeModal({
   const awayPossPct = 100 - homePossPct;
 
   const outcomeLabel = onlineSummary
-    ? stats.homeScore > stats.awayScore
-      ? `VICTOIRE · ${onlineSummary.homePlayerName}`
-      : stats.awayScore > stats.homeScore
-        ? `VICTOIRE · ${onlineSummary.awayPlayerName}`
-        : 'MATCH NUL'
+    ? onlineSummary.abortedBy
+      ? 'ADVERSAIRE PARTI'
+      : stats.homeScore > stats.awayScore
+        ? `VICTOIRE · ${onlineSummary.homePlayerName}`
+        : stats.awayScore > stats.homeScore
+          ? `VICTOIRE · ${onlineSummary.awayPlayerName}`
+          : 'MATCH NUL'
     : tournamentSummary
       ? tournamentSummary.isChampion
         ? 'TOURNAMENT CHAMPIONS!'
@@ -209,26 +212,35 @@ export function FullTimeModal({
         <div className="text-center">
           <div
             className={`text-xs font-semibold uppercase tracking-widest ${
-              onlineSummary
-                ? 'text-sky-400'
-                : tournamentSummary
-                  ? tournamentSummary.isChampion
-                    ? 'text-amber-400'
-                    : tournamentSummary.advanced
-                      ? 'text-emerald-400'
-                      : 'text-rose-400'
-                  : 'text-emerald-400'
+              onlineSummary?.abortedBy
+                ? 'text-amber-400'
+                : onlineSummary
+                  ? 'text-sky-400'
+                  : tournamentSummary
+                    ? tournamentSummary.isChampion
+                      ? 'text-amber-400'
+                      : tournamentSummary.advanced
+                        ? 'text-emerald-400'
+                        : 'text-rose-400'
+                    : 'text-emerald-400'
             }`}
           >
-            {onlineSummary
-              ? 'FIN DU MATCH EN LIGNE'
-              : tournamentSummary
-                ? `FULL TIME · ${tournamentSummary.roundLabel.toUpperCase()}`
-                : 'FULL TIME'}
+            {onlineSummary?.abortedBy
+              ? 'MATCH ARRÊTÉ'
+              : onlineSummary
+                ? 'FIN DU MATCH EN LIGNE'
+                : tournamentSummary
+                  ? `FULL TIME · ${tournamentSummary.roundLabel.toUpperCase()}`
+                  : 'FULL TIME'}
           </div>
           <h2 className="font-display font-extrabold text-3xl text-white mt-1">
             {outcomeLabel}
           </h2>
+          {onlineSummary?.abortedBy && (
+            <p className="text-xs sm:text-sm text-amber-200/90 mt-1.5">
+              {onlineSummary.abortedBy} a quitté le salon. Le match a été arrêté.
+            </p>
+          )}
         </div>
 
         {/* Final Scoreboard */}
@@ -305,7 +317,7 @@ export function FullTimeModal({
             >
               View Bracket
             </button>
-          ) : (
+          ) : !onlineSummary?.abortedBy ? (
             <button
               type="button"
               data-start="true"
@@ -314,11 +326,13 @@ export function FullTimeModal({
             >
               {onlineSummary ? 'REJOUER' : 'Play Again'}
             </button>
-          )}
+          ) : null}
           <button
             type="button"
             onClick={onMainMenu}
-            className="h-11 px-4 rounded-md bg-[#162740] hover:bg-[#1f3557] border border-white/15 text-white font-display font-bold text-base tracking-wider uppercase cursor-pointer"
+            className={`${
+              onlineSummary?.abortedBy ? 'flex-1' : 'px-4'
+            } h-11 rounded-md bg-[#162740] hover:bg-[#1f3557] border border-white/15 text-white font-display font-bold text-base tracking-wider uppercase cursor-pointer`}
           >
             {onlineSummary ? 'QUITTER' : 'Menu'}
           </button>

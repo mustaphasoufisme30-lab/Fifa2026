@@ -145,6 +145,11 @@ export type ServerToClientMessage =
       yourSide: TeamSide;
     }
   | { type: 'match:state'; snapshot: OnlineMatchSnapshot }
-  | { type: 'match:finished'; stats: MatchStats; room: OnlineRoomSnapshot }
+  | {
+      type: 'match:finished';
+      stats: MatchStats;
+      room: OnlineRoomSnapshot;
+      abortedByNickname?: string;
+    }
   | { type: 'opponent:disconnected'; message: string }
   | { type: 'opponent:reconnected'; message: string };

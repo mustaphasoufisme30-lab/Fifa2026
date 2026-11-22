@@ -983,6 +983,13 @@ export class PlayerVisual {
     ball?: BallState,
     showBroadcastTag = false,
     isGoalScorer = false,
+    displayPrefs?: {
+      showCircle?: boolean;
+      showPlayerName?: boolean;
+      userIndicatorColor?: string;
+      rivalIndicatorColor?: string;
+      isRivalHighlight?: boolean;
+    },
   ): void {
     const dt =
       dtOverride !== undefined
@@ -1068,11 +1075,17 @@ export class PlayerVisual {
 
     // Clear TV visual hierarchy: controlled player > goal scorer highlight > active ball carrier
     const showCtrl = player.isControlled;
+    const showCirclePref = displayPrefs?.showCircle ?? true;
+    const showNamePref = displayPrefs?.showPlayerName ?? true;
+    const userHex = displayPrefs?.userIndicatorColor ?? '#38bdf8';
+    const rivalHex = displayPrefs?.rivalIndicatorColor ?? '#ef4444';
+    const isRivalHighlight = Boolean(displayPrefs?.isRivalHighlight);
+
     const ringMat = this.controlledRing.material as THREE.MeshBasicMaterial;
     const markerMat = this.controlledMarker.material as THREE.MeshBasicMaterial;
 
     if (isGoalScorer) {
-      this.controlledRing.visible = true;
+      this.controlledRing.visible = showCirclePref;
       this.controlledMarker.visible = true;
       this.controlledAimPivot.visible = false;
       const pulse = 1.12 + Math.sin(elapsed * 6.5) * 0.1;
@@ -1082,32 +1095,41 @@ export class PlayerVisual {
       this.controlledMarker.position.y = 2.34 + Math.sin(elapsed * 5.5) * 0.06;
       markerMat.color.setHex(0xfde047);
     } else if (showCtrl) {
-      this.controlledRing.visible = true;
+      this.controlledRing.visible = showCirclePref;
       this.controlledMarker.visible = true;
-      this.controlledAimPivot.visible = true;
-      const indicatorHex =
-        shotCharge > 0.72
-          ? 0xf43f5e
-          : shotCharge > 0.05
-            ? 0xfacc15
-            : player.hasBall
-              ? 0xffffff
-              : 0x38bdf8;
+      this.controlledAimPivot.visible = showCirclePref;
       this.controlledRing.scale.setScalar(player.hasBall ? 1.04 : 1.0);
-      ringMat.color.setHex(indicatorHex);
+      if (shotCharge > 0.72) {
+        ringMat.color.setHex(0xf43f5e);
+        markerMat.color.setHex(0xf43f5e);
+        (this.controlledAimArrow.material as THREE.MeshBasicMaterial).color.setHex(0xf43f5e);
+      } else if (shotCharge > 0.05) {
+        ringMat.color.setHex(0xfacc15);
+        markerMat.color.setHex(0xfacc15);
+        (this.controlledAimArrow.material as THREE.MeshBasicMaterial).color.setHex(0xfacc15);
+      } else {
+        ringMat.color.set(player.hasBall ? '#ffffff' : userHex);
+        markerMat.color.set(userHex);
+        (this.controlledAimArrow.material as THREE.MeshBasicMaterial).color.set(userHex);
+      }
       ringMat.opacity = 0.92;
       this.controlledMarker.position.y = 2.26 + Math.sin(elapsed * 4.5) * 0.05;
-      markerMat.color.setHex(
-        shotCharge > 0.72 ? 0xf43f5e : shotCharge > 0.05 ? 0xfacc15 : 0x2dd4bf,
-      );
 
       this.controlledAimPivot.rotation.y = player.facingAngle;
       this.controlledAimArrow.position.z = 0.78 + shotCharge * 0.52;
       this.controlledAimArrow.scale.set(1 + shotCharge * 0.3, 1, 1 + shotCharge * 0.85);
-      (this.controlledAimArrow.material as THREE.MeshBasicMaterial).color.setHex(indicatorHex);
+    } else if (isRivalHighlight) {
+      this.controlledRing.visible = showCirclePref;
+      this.controlledMarker.visible = true;
+      this.controlledAimPivot.visible = false;
+      this.controlledRing.scale.setScalar(0.95);
+      ringMat.color.set(rivalHex);
+      ringMat.opacity = 0.55;
+      this.controlledMarker.position.y = 2.24 + Math.sin(elapsed * 4.5) * 0.04;
+      markerMat.color.set(rivalHex);
     } else if (player.hasBall) {
       // Subtle translucent ground ring on non-controlled ball carrier for instant TV readability
-      this.controlledRing.visible = true;
+      this.controlledRing.visible = showCirclePref;
       this.controlledMarker.visible = false;
       this.controlledAimPivot.visible = false;
       this.controlledRing.scale.setScalar(0.95);
@@ -1120,7 +1142,7 @@ export class PlayerVisual {
     }
 
     // Broadcast TV nameplate floating cleanly over goal scorer, controlled player, or active ball-carrier
-    const wantTag = isGoalScorer || showBroadcastTag || showCtrl;
+    const wantTag = showNamePref && (isGoalScorer || showBroadcastTag || showCtrl);
     if (wantTag) {
       const style: NameplateStyle = isGoalScorer
         ? 'scorer'

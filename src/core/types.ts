@@ -18,7 +18,15 @@ export type TacticalMentality = 'defensive' | 'balanced' | 'attacking';
 
 export type QualityLevel = 'low' | 'medium' | 'high';
 
-export type CameraMode = 'tv' | 'close' | 'player' | 'replay';
+export type CameraMode = 'tv' | 'close' | 'player' | 'vertical' | 'replay';
+
+export type MatchDifficulty = 'amateur' | 'pro' | 'world_class';
+
+export type ControlAssistMode = 'manual' | 'assisted' | 'semi_auto';
+
+export type WeatherPreset = 'clear' | 'overcast' | 'evening' | 'night';
+
+export type ViewMode = '3d' | '2d';
 
 export type GameShellState = 'title' | 'tournament' | 'online' | 'playing' | 'paused' | 'gameover';
 
@@ -260,6 +268,19 @@ export interface GameSettings {
   soundEnabled: boolean;
   showTouchControls: boolean;
   halfDurationSeconds: number; // real-time seconds per half (e.g., 120s)
+  matchLevel: MatchDifficulty;
+  controlMode: ControlAssistMode;
+  weather: WeatherPreset;
+  cameraHeight: number; // meters (14..34, default 24)
+  soundVolume: number; // 0..100 master/stadium volume
+  effectsEnabled: boolean;
+  effectsVolume: number; // 0..100 match SFX volume
+  userIndicatorColor: string; // hex color for user player marker
+  rivalIndicatorColor: string; // hex color for rival marker
+  showRadar: boolean;
+  showPlayerName: boolean;
+  showCircle: boolean;
+  viewMode: ViewMode;
 }
 
 export interface MatchStats {

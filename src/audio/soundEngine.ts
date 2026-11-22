@@ -10,7 +10,11 @@ export type CrowdReactionType = 'ooh' | 'applause' | 'boo';
 class SoundEngine {
   private ctx: AudioContext | null = null;
   private masterBus: GainNode | null = null;
+  private sfxBus: GainNode | null = null;
   private enabled = true;
+  private masterVolume = 1;
+  private effectsEnabled = true;
+  private effectsVolume = 0.75;
   private unlocked = false;
 
   // Preloaded reusable audio buffers (synthesized once, zero runtime buffer allocations)
@@ -55,11 +59,44 @@ class SoundEngine {
 
   public setEnabled(enabled: boolean): void {
     this.enabled = enabled;
+    this.applyBusGains();
     if (!enabled) {
       this.muteCrowdNow();
     } else if (this.unlocked && this.baseCrowdIntensity > 0) {
       this.ensureCrowdAmbience();
       this.applyCrowdLevels();
+    }
+  }
+
+  public setAudioMix(opts: {
+    soundEnabled: boolean;
+    soundVolume: number; // 0..100
+    effectsEnabled: boolean;
+    effectsVolume: number; // 0..100
+  }): void {
+    this.enabled = opts.soundEnabled;
+    this.masterVolume = Math.max(0, Math.min(1, opts.soundVolume / 100));
+    this.effectsEnabled = opts.effectsEnabled;
+    this.effectsVolume = Math.max(0, Math.min(1, opts.effectsVolume / 100));
+    this.applyBusGains();
+    if (!this.enabled || this.masterVolume <= 0.001) {
+      this.muteCrowdNow();
+    } else if (this.unlocked && this.baseCrowdIntensity > 0) {
+      this.ensureCrowdAmbience();
+      this.applyCrowdLevels();
+    }
+  }
+
+  private applyBusGains(): void {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    if (this.masterBus) {
+      const targetMaster = this.enabled ? 0.92 * this.masterVolume : 0;
+      this.masterBus.gain.setTargetAtTime(targetMaster, now, 0.04);
+    }
+    if (this.sfxBus) {
+      const targetSfx = this.enabled && this.effectsEnabled ? this.effectsVolume : 0;
+      this.sfxBus.gain.setTargetAtTime(targetSfx, now, 0.04);
     }
   }
 
@@ -116,7 +153,7 @@ class SoundEngine {
 
       // Lightweight master bus with soft dynamics limiter for clean mobile speaker mixing
       const master = this.ctx.createGain();
-      master.gain.value = 0.92;
+      master.gain.value = this.enabled ? 0.92 * this.masterVolume : 0;
       if (typeof this.ctx.createDynamicsCompressor === 'function') {
         const comp = this.ctx.createDynamicsCompressor();
         comp.threshold.value = -12;
@@ -131,6 +168,11 @@ class SoundEngine {
       }
       this.masterBus = master;
 
+      const sfx = this.ctx.createGain();
+      sfx.gain.value = this.enabled && this.effectsEnabled ? this.effectsVolume : 0;
+      sfx.connect(master);
+      this.sfxBus = sfx;
+
       this.preloadBuffers(this.ctx);
     }
     if (this.ctx.state === 'suspended') {
@@ -141,6 +183,10 @@ class SoundEngine {
 
   private getOutputNode(ctx: AudioContext): AudioNode {
     return this.masterBus ?? ctx.destination;
+  }
+
+  private getSfxOutputNode(ctx: AudioContext): AudioNode {
+    return this.sfxBus ?? this.masterBus ?? ctx.destination;
   }
 
   /**
@@ -320,6 +366,7 @@ class SoundEngine {
   }
 
   public playKick(power = 1): void {
+    if (!this.effectsEnabled || this.effectsVolume <= 0.001) return;
     const ctx = this.ensureContext();
     if (!ctx) return;
     if (!canTriggerSound(this.lastTriggeredMs, 'kick', performance.now())) return;
@@ -336,17 +383,18 @@ class SoundEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
 
     osc.connect(gain);
-    gain.connect(this.getOutputNode(ctx));
+    gain.connect(this.getSfxOutputNode(ctx));
     osc.start(now);
     osc.stop(now + 0.14);
   }
 
   public playWhistle(pattern: 'short' | 'double' | 'long' = 'short'): void {
+    if (!this.effectsEnabled || this.effectsVolume <= 0.001) return;
     const ctx = this.ensureContext();
     if (!ctx) return;
     if (!canTriggerSound(this.lastTriggeredMs, 'whistle', performance.now())) return;
 
-    const out = this.getOutputNode(ctx);
+    const out = this.getSfxOutputNode(ctx);
     const triggerBlast = (offset: number, duration: number) => {
       const now = ctx.currentTime + offset;
       const osc1 = ctx.createOscillator();
@@ -383,6 +431,7 @@ class SoundEngine {
   }
 
   public playPostHit(): void {
+    if (!this.effectsEnabled || this.effectsVolume <= 0.001) return;
     const ctx = this.ensureContext();
     if (!ctx) return;
     if (!canTriggerSound(this.lastTriggeredMs, 'postHit', performance.now())) return;
@@ -397,7 +446,7 @@ class SoundEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
 
     osc.connect(gain);
-    gain.connect(this.getOutputNode(ctx));
+    gain.connect(this.getSfxOutputNode(ctx));
     osc.start(now);
     osc.stop(now + 0.28);
   }
@@ -506,6 +555,7 @@ class SoundEngine {
   }
 
   public playNetSwish(): void {
+    if (!this.effectsEnabled || this.effectsVolume <= 0.001) return;
     const ctx = this.ensureContext();
     if (!ctx || !this.shortNoiseBuffer) return;
     if (!canTriggerSound(this.lastTriggeredMs, 'netSwish', performance.now())) return;
@@ -525,12 +575,13 @@ class SoundEngine {
 
     noise.connect(filter);
     filter.connect(gain);
-    gain.connect(this.getOutputNode(ctx));
+    gain.connect(this.getSfxOutputNode(ctx));
     noise.start(now, 0, 0.24);
     noise.stop(now + 0.24);
   }
 
   public playTackle(): void {
+    if (!this.effectsEnabled || this.effectsVolume <= 0.001) return;
     const ctx = this.ensureContext();
     if (!ctx || !this.shortNoiseBuffer) return;
     if (!canTriggerSound(this.lastTriggeredMs, 'tackle', performance.now())) return;
@@ -551,7 +602,7 @@ class SoundEngine {
 
     noise.connect(filter);
     filter.connect(gain);
-    gain.connect(this.getOutputNode(ctx));
+    gain.connect(this.getSfxOutputNode(ctx));
     noise.start(now, 0, 0.18);
     noise.stop(now + 0.18);
   }

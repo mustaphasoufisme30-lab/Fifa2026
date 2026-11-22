@@ -1,18 +1,12 @@
-import { DEFAULT_HALF_REAL_SECONDS } from './constants';
 import { SavedState } from './types';
+import { getDefaultGameSettings, sanitizeGameSettings } from './settingsConfig';
 import { getDefaultCustomPlayer, sanitizeCustomPlayerProfile } from '../players/customPlayer';
 
 const STORAGE_KEY = 'club_xi_football_save_v1';
 
 export function getDefaultSavedState(): SavedState {
   return {
-    settings: {
-      quality: 'medium',
-      cameraMode: 'tv',
-      soundEnabled: true,
-      showTouchControls: true,
-      halfDurationSeconds: DEFAULT_HALF_REAL_SECONDS,
-    },
+    settings: getDefaultGameSettings(),
     homeTeamId: 'aurelia',
     awayTeamId: 'nordic',
     homeFormation: '4-3-3',
@@ -43,7 +37,7 @@ export function loadSavedState(): SavedState {
     if (!raw) return defaults;
     const parsed = JSON.parse(raw) as Partial<SavedState>;
     return {
-      settings: { ...defaults.settings, ...(parsed.settings ?? {}) },
+      settings: sanitizeGameSettings(parsed.settings),
       homeTeamId: parsed.homeTeamId ?? defaults.homeTeamId,
       awayTeamId: parsed.awayTeamId ?? defaults.awayTeamId,
       homeFormation: parsed.homeFormation ?? defaults.homeFormation,

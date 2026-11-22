@@ -17,6 +17,9 @@ interface MatchHudProps {
   inputManager: InputManager;
   soundEnabled: boolean;
   showTouchControls: boolean;
+  showRadar?: boolean;
+  userIndicatorColor?: string;
+  rivalIndicatorColor?: string;
   onlineOverlay?: OnlineMatchOverlayInfo | null;
   onCycleCamera: () => void;
   onToggleSound: () => void;
@@ -27,6 +30,7 @@ interface MatchHudProps {
 const CAMERA_LABELS: Record<CameraMode, string> = {
   tv: 'TV',
   close: 'CLOSE',
+  vertical: 'VERTICAL',
   player: 'PLAYER',
   replay: 'REPLAY',
 };
@@ -45,6 +49,9 @@ export function MatchHud({
   inputManager,
   soundEnabled,
   showTouchControls,
+  showRadar = true,
+  userIndicatorColor = '#38bdf8',
+  rivalIndicatorColor = '#ef4444',
   onlineOverlay = null,
   onCycleCamera,
   onToggleSound,
@@ -54,6 +61,7 @@ export function MatchHud({
   const radarCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
+    if (!showRadar) return;
     const canvas = radarCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -88,10 +96,10 @@ export function MatchHud({
       ctx.beginPath();
       ctx.arc(px, py, p.isControlled ? 3.5 : 2.3, 0, Math.PI * 2);
       ctx.fillStyle = p.isControlled
-        ? '#facc15'
+        ? userIndicatorColor
         : p.team === 'home'
           ? snapshot.homeColor
-          : snapshot.awayColor;
+          : rivalIndicatorColor || snapshot.awayColor;
       ctx.fill();
       if (p.isControlled) {
         ctx.strokeStyle = '#ffffff';
@@ -107,7 +115,7 @@ export function MatchHud({
     ctx.arc(bx, by, 2.8, 0, Math.PI * 2);
     ctx.fillStyle = '#ffffff';
     ctx.fill();
-  }, [snapshot]);
+  }, [rivalIndicatorColor, showRadar, snapshot, userIndicatorColor]);
 
   const minStr = String(snapshot.matchMinutes).padStart(2, '0');
   const secStr = String(snapshot.matchSeconds).padStart(2, '0');
@@ -346,13 +354,16 @@ export function MatchHud({
         )}
 
         {/* Live Radar Minimap */}
-        <canvas
-          ref={radarCanvasRef}
-          width={148}
-          height={86}
-          aria-label="Pitch radar minimap"
-          className="hidden md:block rounded border border-white/25 shadow-lg opacity-90"
-        />
+        {showRadar && (
+          <canvas
+            ref={radarCanvasRef}
+            width={148}
+            height={86}
+            data-testid="pitch-radar"
+            aria-label="Pitch radar minimap"
+            className="hidden md:block rounded border border-white/25 shadow-lg opacity-90"
+          />
+        )}
       </div>
 
       {/* Mobile / Touch Controls */}

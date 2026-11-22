@@ -4,8 +4,16 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { soundEngine } from '../audio/soundEngine';
 import { BallVisual } from '../ball/ballMesh';
 import { CameraController, CameraDynamicContext } from '../camera/cameraController';
+import { WEATHER_LIGHTING_PRESETS } from '../core/settingsConfig';
 import { buildStadium, StadiumResources } from '../core/stadiumMesh';
-import { CameraMode, GameSettings, GameShellState, InputSnapshot, TeamSide } from '../core/types';
+import {
+  CameraMode,
+  GameSettings,
+  GameShellState,
+  InputSnapshot,
+  TeamSide,
+  WeatherPreset,
+} from '../core/types';
 import { InputManager } from '../controls/inputManager';
 import { MatchEngine } from '../game/matchEngine';
 import {
@@ -94,7 +102,9 @@ export function PitchScene({
     scorerPos: null,
     isReplaying: false,
   });
+  const hemiLightRef = useRef<THREE.HemisphereLight | null>(null);
   const keyLightRef = useRef<THREE.DirectionalLight | null>(null);
+  const fillLightRef = useRef<THREE.DirectionalLight | null>(null);
   const isSoftwareGlRef = useRef(false);
   const crowdObserverRef = useRef({
     passes: 0,
@@ -128,6 +138,47 @@ export function PitchScene({
       playerVisualsRef.current.set(p.id, pv);
     }
     playerShadowBatchRef.current?.sync(engine.players);
+  };
+
+  const applyWeatherPreset = (weather: WeatherPreset) => {
+    const preset = WEATHER_LIGHTING_PRESETS[weather] ?? WEATHER_LIGHTING_PRESETS.clear;
+    const scene = sceneRef.current;
+    const renderer = rendererRef.current;
+    const hemi = hemiLightRef.current;
+    const key = keyLightRef.current;
+    const fill = fillLightRef.current;
+
+    if (scene) {
+      if (scene.background instanceof THREE.Color) {
+        scene.background.setHex(preset.skyHex);
+      } else {
+        scene.background = new THREE.Color(preset.skyHex);
+      }
+      if (scene.fog instanceof THREE.Fog) {
+        scene.fog.color.setHex(preset.fogHex);
+        scene.fog.near = preset.fogNear;
+        scene.fog.far = preset.fogFar;
+      } else {
+        scene.fog = new THREE.Fog(preset.fogHex, preset.fogNear, preset.fogFar);
+      }
+      scene.environmentIntensity = preset.envIntensity;
+    }
+    if (renderer) {
+      renderer.toneMappingExposure = preset.exposure;
+    }
+    if (hemi) {
+      hemi.color.setHex(preset.hemiSkyHex);
+      hemi.groundColor.setHex(preset.hemiGroundHex);
+      hemi.intensity = preset.hemiIntensity;
+    }
+    if (key) {
+      key.color.setHex(preset.keyHex);
+      key.intensity = preset.keyIntensity;
+    }
+    if (fill) {
+      fill.color.setHex(preset.fillHex);
+      fill.intensity = preset.fillIntensity;
+    }
   };
 
   // Mount Three.js renderer & stadium once
@@ -182,6 +233,7 @@ export function PitchScene({
     const hemiLight = new THREE.HemisphereLight(0xd8eeff, 0x3b6620, 0.85);
     hemiLight.position.set(0, 55, 0);
     scene.add(hemiLight);
+    hemiLightRef.current = hemiLight;
 
     const sunOffsetX = 32;
     const sunOffsetY = 50;
@@ -209,6 +261,9 @@ export function PitchScene({
     const fillLight = new THREE.DirectionalLight(0xc2e1ff, 0.32);
     fillLight.position.set(-34, 30, -32);
     scene.add(fillLight);
+    fillLightRef.current = fillLight;
+
+    applyWeatherPreset(settingsRef.current.weather);
 
     const camera = new THREE.PerspectiveCamera(42, width / height, 0.5, 290);
     const cameraCtrl = new CameraController();
@@ -293,6 +348,8 @@ export function PitchScene({
       if (engine) {
         engine.shellState = shellStateRef.current;
         engine.cameraMode = cameraModeRef.current;
+        engine.matchLevel = settingsRef.current.matchLevel;
+        engine.controlAssistMode = settingsRef.current.controlMode;
 
         const inputSnap = inputManager.consumeSnapshot();
         if (onlineModeRef.current && shellStateRef.current === 'playing') {
@@ -400,6 +457,13 @@ export function PitchScene({
             visual.ball,
             isPlayingView && (isLocalControlled || isActiveBallCarrier || isGoalScorer),
             isGoalScorer,
+            {
+              showCircle: settingsRef.current.showCircle,
+              showPlayerName: settingsRef.current.showPlayerName,
+              userIndicatorColor: settingsRef.current.userIndicatorColor,
+              rivalIndicatorColor: settingsRef.current.rivalIndicatorColor,
+              isRivalHighlight: isPlayingView && isActiveBallCarrier && p.team !== activeSide,
+            },
           );
         }
         playerShadowBatchRef.current?.sync(visual.players);
@@ -426,6 +490,8 @@ export function PitchScene({
         camCtx.ballVelocity = visual.ball.velocity;
         camCtx.scorerPos = goalScorerPlayer ? goalScorerPlayer.position : null;
         camCtx.isReplaying = engine.isReplaying;
+        camCtx.cameraHeight = settingsRef.current.cameraHeight;
+        camCtx.viewMode = settingsRef.current.viewMode;
 
         cameraCtrl.update(
           camera,
@@ -500,6 +566,11 @@ export function PitchScene({
     renderer.shadowMap.enabled = shadowsOn;
     if (keyLight) keyLight.castShadow = shadowsOn;
   }, [settings.quality]);
+
+  // Update weather sky, fog, and stadium lighting live
+  useEffect(() => {
+    applyWeatherPreset(settings.weather);
+  }, [settings.weather]);
 
   // Rebuild players when teams/kits change
   useEffect(() => {

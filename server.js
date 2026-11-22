@@ -1823,7 +1823,11 @@ var SoundEngine = class {
   constructor() {
     this.ctx = null;
     this.masterBus = null;
+    this.sfxBus = null;
     this.enabled = true;
+    this.masterVolume = 1;
+    this.effectsEnabled = true;
+    this.effectsVolume = 0.75;
     this.unlocked = false;
     // Preloaded reusable audio buffers (synthesized once, zero runtime buffer allocations)
     this.crowdBedBuffer = null;
@@ -1862,11 +1866,37 @@ var SoundEngine = class {
   }
   setEnabled(enabled) {
     this.enabled = enabled;
+    this.applyBusGains();
     if (!enabled) {
       this.muteCrowdNow();
     } else if (this.unlocked && this.baseCrowdIntensity > 0) {
       this.ensureCrowdAmbience();
       this.applyCrowdLevels();
+    }
+  }
+  setAudioMix(opts) {
+    this.enabled = opts.soundEnabled;
+    this.masterVolume = Math.max(0, Math.min(1, opts.soundVolume / 100));
+    this.effectsEnabled = opts.effectsEnabled;
+    this.effectsVolume = Math.max(0, Math.min(1, opts.effectsVolume / 100));
+    this.applyBusGains();
+    if (!this.enabled || this.masterVolume <= 1e-3) {
+      this.muteCrowdNow();
+    } else if (this.unlocked && this.baseCrowdIntensity > 0) {
+      this.ensureCrowdAmbience();
+      this.applyCrowdLevels();
+    }
+  }
+  applyBusGains() {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    if (this.masterBus) {
+      const targetMaster = this.enabled ? 0.92 * this.masterVolume : 0;
+      this.masterBus.gain.setTargetAtTime(targetMaster, now, 0.04);
+    }
+    if (this.sfxBus) {
+      const targetSfx = this.enabled && this.effectsEnabled ? this.effectsVolume : 0;
+      this.sfxBus.gain.setTargetAtTime(targetSfx, now, 0.04);
     }
   }
   isEnabled() {
@@ -1913,7 +1943,7 @@ var SoundEngine = class {
       if (!AudioCtx) return null;
       this.ctx = new AudioCtx();
       const master = this.ctx.createGain();
-      master.gain.value = 0.92;
+      master.gain.value = this.enabled ? 0.92 * this.masterVolume : 0;
       if (typeof this.ctx.createDynamicsCompressor === "function") {
         const comp = this.ctx.createDynamicsCompressor();
         comp.threshold.value = -12;
@@ -1927,6 +1957,10 @@ var SoundEngine = class {
         master.connect(this.ctx.destination);
       }
       this.masterBus = master;
+      const sfx = this.ctx.createGain();
+      sfx.gain.value = this.enabled && this.effectsEnabled ? this.effectsVolume : 0;
+      sfx.connect(master);
+      this.sfxBus = sfx;
       this.preloadBuffers(this.ctx);
     }
     if (this.ctx.state === "suspended") {
@@ -1936,6 +1970,9 @@ var SoundEngine = class {
   }
   getOutputNode(ctx) {
     return this.masterBus ?? ctx.destination;
+  }
+  getSfxOutputNode(ctx) {
+    return this.sfxBus ?? this.masterBus ?? ctx.destination;
   }
   /**
    * Pre-synthesizes all reusable noise/applause/roar AudioBuffers once at audio unlock
@@ -2077,6 +2114,7 @@ var SoundEngine = class {
     this.crowdMasterGain.gain.setTargetAtTime(0, now, 0.08);
   }
   playKick(power = 1) {
+    if (!this.effectsEnabled || this.effectsVolume <= 1e-3) return;
     const ctx = this.ensureContext();
     if (!ctx) return;
     if (!canTriggerSound(this.lastTriggeredMs, "kick", performance.now())) return;
@@ -2090,15 +2128,16 @@ var SoundEngine = class {
     gain.gain.setValueAtTime(Math.min(0.32, 0.16 * power), now);
     gain.gain.exponentialRampToValueAtTime(1e-3, now + 0.13);
     osc.connect(gain);
-    gain.connect(this.getOutputNode(ctx));
+    gain.connect(this.getSfxOutputNode(ctx));
     osc.start(now);
     osc.stop(now + 0.14);
   }
   playWhistle(pattern = "short") {
+    if (!this.effectsEnabled || this.effectsVolume <= 1e-3) return;
     const ctx = this.ensureContext();
     if (!ctx) return;
     if (!canTriggerSound(this.lastTriggeredMs, "whistle", performance.now())) return;
-    const out = this.getOutputNode(ctx);
+    const out = this.getSfxOutputNode(ctx);
     const triggerBlast = (offset, duration) => {
       const now = ctx.currentTime + offset;
       const osc1 = ctx.createOscillator();
@@ -2130,6 +2169,7 @@ var SoundEngine = class {
     }
   }
   playPostHit() {
+    if (!this.effectsEnabled || this.effectsVolume <= 1e-3) return;
     const ctx = this.ensureContext();
     if (!ctx) return;
     if (!canTriggerSound(this.lastTriggeredMs, "postHit", performance.now())) return;
@@ -2142,7 +2182,7 @@ var SoundEngine = class {
     gain.gain.setValueAtTime(0.18, now);
     gain.gain.exponentialRampToValueAtTime(1e-3, now + 0.26);
     osc.connect(gain);
-    gain.connect(this.getOutputNode(ctx));
+    gain.connect(this.getSfxOutputNode(ctx));
     osc.start(now);
     osc.stop(now + 0.28);
   }
@@ -2231,6 +2271,7 @@ var SoundEngine = class {
     noise.stop(now + duration);
   }
   playNetSwish() {
+    if (!this.effectsEnabled || this.effectsVolume <= 1e-3) return;
     const ctx = this.ensureContext();
     if (!ctx || !this.shortNoiseBuffer) return;
     if (!canTriggerSound(this.lastTriggeredMs, "netSwish", performance.now())) return;
@@ -2246,11 +2287,12 @@ var SoundEngine = class {
     gain.gain.exponentialRampToValueAtTime(1e-3, now + 0.22);
     noise.connect(filter);
     filter.connect(gain);
-    gain.connect(this.getOutputNode(ctx));
+    gain.connect(this.getSfxOutputNode(ctx));
     noise.start(now, 0, 0.24);
     noise.stop(now + 0.24);
   }
   playTackle() {
+    if (!this.effectsEnabled || this.effectsVolume <= 1e-3) return;
     const ctx = this.ensureContext();
     if (!ctx || !this.shortNoiseBuffer) return;
     if (!canTriggerSound(this.lastTriggeredMs, "tackle", performance.now())) return;
@@ -2267,7 +2309,7 @@ var SoundEngine = class {
     gain.gain.exponentialRampToValueAtTime(1e-3, now + 0.17);
     noise.connect(filter);
     filter.connect(gain);
-    gain.connect(this.getOutputNode(ctx));
+    gain.connect(this.getSfxOutputNode(ctx));
     noise.start(now, 0, 0.18);
     noise.stop(now + 0.18);
   }
@@ -2390,6 +2432,18 @@ function stepControlMode(prev, input, dtMs, confirmWindowMs = CONTROL_MODE_CONFI
     },
     changed: false
   };
+}
+
+// src/core/settingsConfig.ts
+function getDifficultyAiSpeedScale(level) {
+  switch (level) {
+    case "amateur":
+      return 0.88;
+    case "pro":
+      return 1;
+    case "world_class":
+      return 1.1;
+  }
 }
 
 // src/game/replayRecorder.ts
@@ -3061,6 +3115,8 @@ var MatchEngine = class {
     this.matchMinutes = 0;
     this.matchSeconds = 0;
     this.cameraMode = "tv";
+    this.matchLevel = "amateur";
+    this.controlAssistMode = "manual";
     /** Online multiplayer configuration */
     this.awayHumanControl = false;
     this.localSide = "home";
@@ -3091,6 +3147,7 @@ var MatchEngine = class {
     this.gkDiveReactionTimer = /* @__PURE__ */ new Map();
     this.lastHomeInputDir = { x: 0, z: 0 };
     this.lastAwayInputDir = { x: 0, z: 0 };
+    this.autoSwitchCooldown = 0;
     this.controlModeState = createControlModeState("ATTACK");
     this.homeTeam = homeTeam;
     this.awayTeam = awayTeam;
@@ -3674,6 +3731,36 @@ var MatchEngine = class {
         if (current) current.isControlled = false;
         target.isControlled = true;
         this.shotCharge = 0;
+        this.autoSwitchCooldown = 1.1;
+      }
+    }
+    if (this.autoSwitchCooldown > 0) {
+      this.autoSwitchCooldown = Math.max(0, this.autoSwitchCooldown - dt);
+    }
+    if (!this.awayHumanControl && this.controlAssistMode !== "manual" && this.autoSwitchCooldown <= 0 && this.phase === "live") {
+      const current = this.getControlledPlayer("home");
+      const ownerTeam = this.resolveBallOwnerTeam();
+      if (current && !current.hasBall && ownerTeam !== "home" && current.actionState !== "tackle" && current.actionState !== "kick") {
+        const curDist = Math.hypot(
+          current.position.x - this.ball.position.x,
+          current.position.z - this.ball.position.z
+        );
+        const switchThreshold = this.controlAssistMode === "assisted" ? 10.5 : 14.5;
+        if (curDist > switchThreshold) {
+          const better = selectSwitchTarget(this.players, this.ball, "home", current.id);
+          if (better) {
+            const betterDist = Math.hypot(
+              better.position.x - this.ball.position.x,
+              better.position.z - this.ball.position.z
+            );
+            if (betterDist + 3 < curDist) {
+              current.isControlled = false;
+              better.isControlled = true;
+              this.shotCharge = 0;
+              this.autoSwitchCooldown = 0.85;
+            }
+          }
+        }
       }
     }
     if (this.awayHumanControl && awayInput?.switchPressed) {
@@ -4229,7 +4316,8 @@ var MatchEngine = class {
       if (dist > 0.35) {
         const nx = dx / dist;
         const nz = dz / dist;
-        const maxSpeed = p.attributes.speed * (steering.sprint ? 1.18 : 0.92);
+        const aiDifficultyScale = p.team === "away" && !this.awayHumanControl ? getDifficultyAiSpeedScale(this.matchLevel) : 1;
+        const maxSpeed = p.attributes.speed * (steering.sprint ? 1.18 : 0.92) * aiDifficultyScale;
         const desiredSpeed = Math.min(maxSpeed, dist * 2.8);
         const targetAngle = Math.atan2(nx, nz);
         stepPlayerLocomotion(

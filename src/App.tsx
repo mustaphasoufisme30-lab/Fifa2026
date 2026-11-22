@@ -78,11 +78,12 @@ import { OfflineGateModal } from './ui/OfflineGateModal';
 import { OnlineScreen } from './ui/OnlineScreen';
 import { PitchScene } from './ui/PitchScene';
 import { PlayerStudioModal } from './ui/PlayerStudioModal';
+import { SettingsModal } from './ui/SettingsModal';
 import { TeamMatchupModal } from './ui/TeamMatchupModal';
 import { TitlePanel, TitleScreen } from './ui/TitleScreen';
 import { TournamentScreen } from './ui/TournamentScreen';
 
-const CAMERA_CYCLE: CameraMode[] = ['tv', 'close', 'player'];
+const CAMERA_CYCLE: CameraMode[] = ['tv', 'close', 'vertical', 'player'];
 
 function toRoomBootstrap(doc: FirestoreRoomDoc): RoomBootstrapData {
   return {
@@ -169,6 +170,7 @@ export default function App() {
   const [saved, setSaved] = useState<SavedState>(() => loadSavedState());
   const [shellState, setShellState] = useState<GameShellState>('title');
   const [activePanel, setActivePanel] = useState<TitlePanel>(null);
+  const [pauseSettingsOpen, setPauseSettingsOpen] = useState(false);
   const [teamVersion, setTeamVersion] = useState(0);
   const [contextLost, setContextLost] = useState(false);
   const [activeTournamentMatch, setActiveTournamentMatch] =
@@ -939,9 +941,14 @@ export default function App() {
     document.body.dataset.online = isOnline ? 'true' : 'false';
   }, [isOnline]);
 
-  // Sync sound setting & stadium spectator ambience with shell/connectivity state
+  // Sync sound setting, volume mix & stadium spectator ambience with shell/connectivity state
   useEffect(() => {
-    soundEngine.setEnabled(saved.settings.soundEnabled && isOnline);
+    soundEngine.setAudioMix({
+      soundEnabled: saved.settings.soundEnabled && isOnline,
+      soundVolume: saved.settings.soundVolume,
+      effectsEnabled: saved.settings.effectsEnabled,
+      effectsVolume: saved.settings.effectsVolume,
+    });
     if (!isOnline || shellState !== 'playing') {
       soundEngine.updateCrowdIntensity(
         computeCrowdIntensity({
@@ -958,7 +965,10 @@ export default function App() {
     hudSnapshot.isReplaying,
     hudSnapshot.phase,
     isOnline,
+    saved.settings.effectsEnabled,
+    saved.settings.effectsVolume,
     saved.settings.soundEnabled,
+    saved.settings.soundVolume,
     shellState,
   ]);
 
@@ -1556,6 +1566,7 @@ export default function App() {
 
   const handleTogglePause = useCallback(() => {
     if (!isOnlineRef.current) return;
+    setPauseSettingsOpen(false);
     setShellState((prev) => {
       if (prev === 'playing') {
         inputManager.clearAll();
@@ -1720,6 +1731,7 @@ export default function App() {
 
   const handleReturnToTitle = useCallback(() => {
     inputManager.clearAll();
+    setPauseSettingsOpen(false);
     if (isOnlineMatchRef.current || onlineRoomRef.current) {
       handleLeaveOnlineRoom();
     }
@@ -1844,6 +1856,15 @@ export default function App() {
               onSave={handleSaveCustomPlayer}
               onClose={() => setActivePanel(null)}
             />
+          ) : activePanel === 'settings' ? (
+            <SettingsModal
+              settings={saved.settings}
+              onSave={(nextSettings) => {
+                handleUpdateSettings(nextSettings);
+                setActivePanel(null);
+              }}
+              onCancel={() => setActivePanel(null)}
+            />
           ) : (
             <TitleSettingsDrawer
               panel={activePanel}
@@ -1924,6 +1945,9 @@ export default function App() {
           inputManager={inputManager}
           soundEnabled={saved.settings.soundEnabled}
           showTouchControls={saved.settings.showTouchControls}
+          showRadar={saved.settings.showRadar}
+          userIndicatorColor={saved.settings.userIndicatorColor}
+          rivalIndicatorColor={saved.settings.rivalIndicatorColor}
           onlineOverlay={
             isOnlineMatch
               ? {
@@ -1947,7 +1971,7 @@ export default function App() {
       )}
 
       {/* Pause Modal */}
-      {shellState === 'paused' && (
+      {shellState === 'paused' && !pauseSettingsOpen && (
         <PauseModal
           homeFormation={saved.homeFormation}
           homeMentality={saved.homeMentality}
@@ -1956,6 +1980,7 @@ export default function App() {
           onSelectFormation={(id) => handleSelectFormation(id, false)}
           onSelectMentality={handleSelectMentality}
           onResume={handleTogglePause}
+          onOpenSettings={() => setPauseSettingsOpen(true)}
           onRestart={() => {
             if (activeTournamentMatch) {
               handlePlayTournamentMatch(activeTournamentMatch);
@@ -1965,6 +1990,18 @@ export default function App() {
           }}
           onReturnToBracket={handleReturnToBracket}
           onMainMenu={handleReturnToTitle}
+        />
+      )}
+
+      {/* Mid-Match Settings Modal */}
+      {shellState === 'paused' && pauseSettingsOpen && (
+        <SettingsModal
+          settings={saved.settings}
+          onSave={(nextSettings) => {
+            handleUpdateSettings(nextSettings);
+            setPauseSettingsOpen(false);
+          }}
+          onCancel={() => setPauseSettingsOpen(false)}
         />
       )}
 

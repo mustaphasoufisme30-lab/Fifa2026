@@ -1,10 +1,13 @@
 import * as THREE from 'three';
-import { CameraMode, GameShellState, Vec3 } from '../core/types';
+import { CameraMode, GameShellState, Vec3, ViewMode } from '../core/types';
+import { CAMERA_HEIGHT_DEFAULT } from '../core/settingsConfig';
 
 export interface CameraDynamicContext {
   ballVelocity?: Vec3 | null;
   scorerPos?: Vec3 | null;
   isReplaying?: boolean;
+  cameraHeight?: number;
+  viewMode?: ViewMode;
 }
 
 const MIN_BROADCAST_HEIGHT = 5.8;
@@ -49,10 +52,14 @@ export class CameraController {
     mode: CameraMode,
     isGoalCelebration: boolean,
     isReplaying: boolean,
+    viewMode: ViewMode = '3d',
   ): number {
     if (shellState === 'title' || shellState === 'tournament') return 45;
     if (isGoalCelebration) {
       return isReplaying ? 43 : 37.5;
+    }
+    if (viewMode === '2d') {
+      return 34;
     }
     if (mode === 'tv') {
       // Subtle FOV tightening in dangerous box moments & slight widening during long switches
@@ -61,6 +68,9 @@ export class CameraController {
         39.5,
         44.0,
       );
+    }
+    if (mode === 'vertical') {
+      return THREE.MathUtils.clamp(44 - this.dangerZoom * 1.5, 41.5, 45.5);
     }
     if (mode === 'close') {
       return THREE.MathUtils.clamp(39.6 - this.dangerZoom * 1.2, 38.2, 40.5);
@@ -139,6 +149,20 @@ export class CameraController {
     this.prevFocus.set(focusX, 0, focusZ);
     this.hasPrevFocus = true;
 
+    const heightOffset =
+      ((context?.cameraHeight ?? CAMERA_HEIGHT_DEFAULT) - CAMERA_HEIGHT_DEFAULT) * 0.55;
+    const viewMode: ViewMode = context?.viewMode ?? '3d';
+
+    if (viewMode === '2d') {
+      // Elevated top-down 2D tactical broadcast view
+      const clampedX = THREE.MathUtils.clamp(focusX * 0.85, -34, 34);
+      const clampedZ = THREE.MathUtils.clamp(focusZ * 0.55, -12, 12);
+      const topHeight = THREE.MathUtils.clamp(42 + heightOffset * 1.4, 32, 54);
+      this.targetPos.set(clampedX, topHeight, clampedZ + 3.8);
+      this.targetLook.set(clampedX, 0, clampedZ);
+      return;
+    }
+
     if (mode === 'tv') {
       // Dynamic Broadcast Mobile TV framing: preserves Stage 1 base height/distance while adapting softly to zones & spread
       const zonePullX = THREE.MathUtils.clamp(ballPos.x * 0.12, -3.5, 3.5);
@@ -155,14 +179,14 @@ export class CameraController {
 
       // Keep ball safely inside comfortable screen zone even near touchlines/wings
       const height = THREE.MathUtils.clamp(
-        16.4 - this.dangerZoom * 1.35 + this.spreadPullback * 2.1,
-        14.8,
-        18.8,
+        16.4 + heightOffset - this.dangerZoom * 1.35 + this.spreadPullback * 2.1,
+        11.2,
+        24.8,
       );
       const zDist = THREE.MathUtils.clamp(
-        22.6 - this.dangerZoom * 1.8 + this.spreadPullback * 2.7,
-        20.4,
-        25.8,
+        22.6 + heightOffset * 0.65 - this.dangerZoom * 1.8 + this.spreadPullback * 2.7,
+        16.5,
+        30.5,
       );
 
       this.targetPos.set(clampedX, Math.max(MIN_BROADCAST_HEIGHT, height), clampedZ + zDist);
@@ -171,19 +195,30 @@ export class CameraController {
         0.38 + this.dangerZoom * 0.14,
         THREE.MathUtils.clamp(clampedZ + 0.15 + (ballPos.z - clampedZ) * 0.2, -24, 24),
       );
+    } else if (mode === 'vertical') {
+      // Vertical Cam: elevated behind-goal / end-to-end angle looking down pitch length
+      const clampedX = THREE.MathUtils.clamp(focusX * 0.88 - 18.5, -62, 34);
+      const clampedZ = THREE.MathUtils.clamp(focusZ * 0.68, -20, 20);
+      const height = THREE.MathUtils.clamp(19.2 + heightOffset * 0.9, 13.5, 27.5);
+      this.targetPos.set(clampedX, Math.max(MIN_BROADCAST_HEIGHT, height), clampedZ);
+      this.targetLook.set(
+        THREE.MathUtils.clamp(focusX + 8.5, -46, 52),
+        0.65,
+        THREE.MathUtils.clamp(focusZ * 0.72, -22, 22),
+      );
     } else if (mode === 'close') {
       // Closer TV Action angle with smooth non-clipping height floor & comfortable ball centering
       const clampedX = THREE.MathUtils.clamp(focusX * 0.92 + this.leadOffset.x * 0.72, -46, 46);
       const clampedZ = THREE.MathUtils.clamp(focusZ * 0.72 + this.leadOffset.z * 0.45, -20, 21);
       const height = THREE.MathUtils.clamp(
-        12.2 - this.dangerZoom * 0.8 + this.spreadPullback * 1.35,
-        11.2,
-        13.9,
+        12.2 + heightOffset * 0.65 - this.dangerZoom * 0.8 + this.spreadPullback * 1.35,
+        8.8,
+        18.5,
       );
       const zDist = THREE.MathUtils.clamp(
-        18.0 - this.dangerZoom * 1.1 + this.spreadPullback * 1.8,
-        16.6,
-        20.2,
+        18.0 + heightOffset * 0.45 - this.dangerZoom * 1.1 + this.spreadPullback * 1.8,
+        14.0,
+        24.0,
       );
       this.targetPos.set(clampedX, Math.max(MIN_BROADCAST_HEIGHT, height), clampedZ + zDist);
       this.targetLook.set(
@@ -196,7 +231,7 @@ export class CameraController {
       // Behind-the-shoulder action view looking toward +X attack direction (clamped safely above players & turf)
       this.targetPos.set(
         THREE.MathUtils.clamp(anchor.x - 10.5, -58, 52),
-        Math.max(MIN_PLAYER_HEIGHT, 6.2),
+        Math.max(MIN_PLAYER_HEIGHT, 6.2 + heightOffset * 0.35),
         THREE.MathUtils.clamp(anchor.z + 6.5, -32, 34),
       );
       this.targetLook.set(anchor.x + 8.5, 1.1, anchor.z * 0.85);
@@ -283,7 +318,13 @@ export class CameraController {
     this.currentLook.y = THREE.MathUtils.damp(this.currentLook.y, this.targetLook.y, lookLambda, dt);
     this.currentLook.z = THREE.MathUtils.damp(this.currentLook.z, this.targetLook.z, lookLambda, dt);
 
-    const targetFov = this.getTargetFov(shellState, mode, isGoalCelebration, isReplaying);
+    const targetFov = this.getTargetFov(
+      shellState,
+      mode,
+      isGoalCelebration,
+      isReplaying,
+      context?.viewMode ?? '3d',
+    );
     const fovLambda = isTransitioning || isGoalCelebration ? 4.2 : 5.2;
     const nextFov = THREE.MathUtils.damp(camera.fov, targetFov, fovLambda, dt);
     if (Math.abs(nextFov - camera.fov) > 0.01) {

@@ -22,15 +22,18 @@ import {
   PLAYER_RADIUS,
   TACKLE_REACH,
 } from '../core/constants';
+import { getDifficultyAiSpeedScale } from '../core/settingsConfig';
 import {
   BallRestartOrigin,
   BallState,
   CameraMode,
+  ControlAssistMode,
   FormationId,
   FoulRecord,
   FreeKickKind,
   GameShellState,
   InputSnapshot,
+  MatchDifficulty,
   MatchHudSnapshot,
   MatchPhase,
   MatchStats,
@@ -126,6 +129,8 @@ export class MatchEngine {
   public matchMinutes = 0;
   public matchSeconds = 0;
   public cameraMode: CameraMode = 'tv';
+  public matchLevel: MatchDifficulty = 'amateur';
+  public controlAssistMode: ControlAssistMode = 'manual';
 
   /** Online multiplayer configuration */
   public awayHumanControl = false;
@@ -165,6 +170,7 @@ export class MatchEngine {
   private gkDiveReactionTimer: Map<string, number> = new Map();
   private lastHomeInputDir = { x: 0, z: 0 };
   private lastAwayInputDir = { x: 0, z: 0 };
+  private autoSwitchCooldown = 0;
   private controlModeState: ControlModeState = createControlModeState('ATTACK');
 
   private resolveBallOwnerTeam(): TeamSide | null {
@@ -858,6 +864,50 @@ export class MatchEngine {
         if (current) current.isControlled = false;
         target.isControlled = true;
         this.shotCharge = 0;
+        this.autoSwitchCooldown = 1.1;
+      }
+    }
+
+    if (this.autoSwitchCooldown > 0) {
+      this.autoSwitchCooldown = Math.max(0, this.autoSwitchCooldown - dt);
+    }
+
+    // Assisted / Semi-Auto defensive auto-switch (single-player only, never interrupts ball carrier or tackles)
+    if (
+      !this.awayHumanControl &&
+      this.controlAssistMode !== 'manual' &&
+      this.autoSwitchCooldown <= 0 &&
+      this.phase === 'live'
+    ) {
+      const current = this.getControlledPlayer('home');
+      const ownerTeam = this.resolveBallOwnerTeam();
+      if (
+        current &&
+        !current.hasBall &&
+        ownerTeam !== 'home' &&
+        current.actionState !== 'tackle' &&
+        current.actionState !== 'kick'
+      ) {
+        const curDist = Math.hypot(
+          current.position.x - this.ball.position.x,
+          current.position.z - this.ball.position.z,
+        );
+        const switchThreshold = this.controlAssistMode === 'assisted' ? 10.5 : 14.5;
+        if (curDist > switchThreshold) {
+          const better = selectSwitchTarget(this.players, this.ball, 'home', current.id);
+          if (better) {
+            const betterDist = Math.hypot(
+              better.position.x - this.ball.position.x,
+              better.position.z - this.ball.position.z,
+            );
+            if (betterDist + 3.0 < curDist) {
+              current.isControlled = false;
+              better.isControlled = true;
+              this.shotCharge = 0;
+              this.autoSwitchCooldown = 0.85;
+            }
+          }
+        }
       }
     }
 
@@ -1527,7 +1577,11 @@ export class MatchEngine {
       if (dist > 0.35) {
         const nx = dx / dist;
         const nz = dz / dist;
-        const maxSpeed = p.attributes.speed * (steering.sprint ? 1.18 : 0.92);
+        const aiDifficultyScale =
+          p.team === 'away' && !this.awayHumanControl
+            ? getDifficultyAiSpeedScale(this.matchLevel)
+            : 1;
+        const maxSpeed = p.attributes.speed * (steering.sprint ? 1.18 : 0.92) * aiDifficultyScale;
         const desiredSpeed = Math.min(maxSpeed, dist * 2.8);
         const targetAngle = Math.atan2(nx, nz);
         stepPlayerLocomotion(

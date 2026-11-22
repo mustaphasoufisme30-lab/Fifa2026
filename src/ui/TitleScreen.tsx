@@ -46,9 +46,9 @@ export function TitleScreen({
   }, [onStartMatch]);
 
   return (
-    <div className="fixed inset-0 z-20 flex flex-col justify-between p-6 sm:p-10 pointer-events-none bg-gradient-to-r from-[#060d17]/90 via-[#060d17]/55 to-transparent">
+    <div className="fixed inset-0 z-20 flex flex-col justify-between p-6 sm:p-10 [@media(max-height:480px)]:py-3 [@media(max-height:480px)]:px-5 overflow-y-auto pointer-events-none bg-gradient-to-r from-[#060d17]/90 via-[#060d17]/55 to-transparent">
       {/* Top Matchup Line (Clean unboxed typography, zero pills) */}
-      <div className="flex items-center justify-between text-xs sm:text-sm text-slate-300 font-medium">
+      <div className="flex items-center justify-between text-xs sm:text-sm text-slate-300 font-medium shrink-0">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
             Vous
@@ -96,12 +96,12 @@ export function TitleScreen({
       </div>
 
       {/* Main Left-Third Title Lockup & Menu */}
-      <div className="max-w-md flex flex-col items-start gap-5 pointer-events-auto my-auto">
+      <div className="max-w-md flex flex-col items-start gap-5 [@media(max-height:480px)]:gap-2 pointer-events-auto my-auto">
         {/* Custom Inline SVG Crest & Wordmark */}
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 [@media(max-height:480px)]:gap-2.5">
           <svg
             viewBox="0 0 64 64"
-            className="w-14 h-14 sm:w-16 sm:h-16 shrink-0"
+            className="w-14 h-14 sm:w-16 sm:h-16 [@media(max-height:480px)]:w-10 [@media(max-height:480px)]:h-10 shrink-0"
             aria-hidden="true"
           >
             <path
@@ -118,25 +118,25 @@ export function TitleScreen({
             <polygon points="32,24 37,28 35,35 29,35 27,28" fill="#38bdf8" />
           </svg>
           <div>
-            <h1 className="font-display font-extrabold text-5xl sm:text-6xl tracking-tight text-white leading-none">
+            <h1 className="font-display font-extrabold text-5xl sm:text-6xl [@media(max-height:480px)]:text-3xl tracking-tight text-white leading-none">
               FiFA 2026
             </h1>
-            <p className="text-sm text-slate-300 mt-1">
+            <p className="text-sm [@media(max-height:480px)]:text-xs text-slate-300 mt-1 [@media(max-height:480px)]:mt-0.5">
               11v11 3D Stadium Football
             </p>
-            <p className="text-xs text-slate-300/90 mt-1">
+            <p className="text-xs [@media(max-height:480px)]:hidden text-slate-300/90 mt-1">
               Créé par <span className="text-white font-semibold">Mustapha Mahfoud</span>
             </p>
           </div>
         </div>
 
         {/* Primary Kick Off + Online 1v1 + Tournament Cup + Secondary Menu Actions */}
-        <div className="w-full flex flex-col gap-2.5">
+        <div className="w-full flex flex-col gap-2.5 [@media(max-height:480px)]:gap-1.5">
           <button
             type="button"
             data-start="true"
             onClick={onStartMatch}
-            className="w-full sm:w-96 h-12 px-6 rounded-md bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-slate-950 font-display font-extrabold text-xl tracking-wider uppercase flex items-center justify-center gap-2.5 shadow-lg transition-colors whitespace-nowrap cursor-pointer"
+            className="w-full sm:w-96 h-12 [@media(max-height:480px)]:h-9 px-6 rounded-md bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-slate-950 font-display font-extrabold text-xl [@media(max-height:480px)]:text-base tracking-wider uppercase flex items-center justify-center gap-2.5 shadow-lg transition-colors whitespace-nowrap cursor-pointer"
           >
             <Play className="w-5 h-5 fill-slate-950 shrink-0" />
             <span>PLAY</span>
@@ -146,7 +146,7 @@ export function TitleScreen({
             type="button"
             data-testid="open-online-btn"
             onClick={onOpenOnline}
-            className="w-full sm:w-96 h-11 px-5 rounded-md bg-sky-500 hover:bg-sky-400 active:bg-sky-600 text-slate-950 font-display font-extrabold text-base tracking-wider uppercase flex items-center justify-center gap-2 shadow-md transition-colors whitespace-nowrap cursor-pointer"
+            className="w-full sm:w-96 h-11 [@media(max-height:480px)]:h-9 px-5 rounded-md bg-sky-500 hover:bg-sky-400 active:bg-sky-600 text-slate-950 font-display font-extrabold text-base [@media(max-height:480px)]:text-sm tracking-wider uppercase flex items-center justify-center gap-2 shadow-md transition-colors whitespace-nowrap cursor-pointer"
           >
             <Globe className="w-4 h-4 shrink-0" />
             <span>MATCH EN LIGNE</span>
@@ -155,7 +155,7 @@ export function TitleScreen({
           <button
             type="button"
             onClick={onOpenTournament}
-            className="w-full sm:w-96 h-11 px-5 rounded-md bg-[#122238]/95 hover:bg-[#1a3150] border border-amber-400/55 text-white font-display font-bold text-base tracking-wider uppercase flex items-center justify-center gap-2 shadow-md transition-colors whitespace-nowrap cursor-pointer"
+            className="w-full sm:w-96 h-11 [@media(max-height:480px)]:h-9 px-5 rounded-md bg-[#122238]/95 hover:bg-[#1a3150] border border-amber-400/55 text-white font-display font-bold text-base [@media(max-height:480px)]:text-sm tracking-wider uppercase flex items-center justify-center gap-2 shadow-md transition-colors whitespace-nowrap cursor-pointer"
           >
             <Trophy className="w-4 h-4 text-amber-400 shrink-0" />
             <span>TOURNAMENT</span>
@@ -166,11 +166,11 @@ export function TitleScreen({
             )}
           </button>
 
-          <div className="grid grid-cols-2 gap-2 w-full sm:w-96">
+          <div className="grid grid-cols-2 gap-2 [@media(max-height:480px)]:gap-1.5 w-full sm:w-96">
             <button
               type="button"
               onClick={() => onOpenPanel('teams')}
-              className="h-10 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+              className="h-10 [@media(max-height:480px)]:h-8 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm [@media(max-height:480px)]:text-xs tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
             >
               <Shield className="w-4 h-4 text-sky-400 shrink-0" />
               <span>TEAMS</span>
@@ -179,7 +179,7 @@ export function TitleScreen({
             <button
               type="button"
               onClick={() => onOpenPanel('formation')}
-              className="h-10 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+              className="h-10 [@media(max-height:480px)]:h-8 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm [@media(max-height:480px)]:text-xs tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
             >
               <Users className="w-4 h-4 text-amber-400 shrink-0" />
               <span>FORMATION</span>
@@ -188,7 +188,7 @@ export function TitleScreen({
             <button
               type="button"
               onClick={() => onOpenPanel('player')}
-              className="h-10 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+              className="h-10 [@media(max-height:480px)]:h-8 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm [@media(max-height:480px)]:text-xs tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
             >
               <UserRound className="w-4 h-4 text-violet-400 shrink-0" />
               <span>PLAYER</span>
@@ -197,7 +197,7 @@ export function TitleScreen({
             <button
               type="button"
               onClick={() => onOpenPanel('settings')}
-              className="h-10 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+              className="h-10 [@media(max-height:480px)]:h-8 px-3 rounded-md bg-[#0e1b2e]/90 hover:bg-[#172b47] border border-white/15 text-slate-100 font-display font-bold text-sm [@media(max-height:480px)]:text-xs tracking-wider uppercase flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
             >
               <Settings className="w-4 h-4 text-emerald-400 shrink-0" />
               <span>SETTINGS</span>
@@ -207,7 +207,7 @@ export function TitleScreen({
       </div>
 
       {/* Bottom Flat Control Hint Line */}
-      <div className="text-xs text-slate-300/90 flex flex-wrap items-center gap-x-3 gap-y-1">
+      <div className="text-xs [@media(max-height:480px)]:hidden text-slate-300/90 flex flex-wrap items-center gap-x-3 gap-y-1 shrink-0">
         <span>WASD / Touch Joystick Move</span>
         <span aria-hidden="true">·</span>
         <span>K Pass</span>

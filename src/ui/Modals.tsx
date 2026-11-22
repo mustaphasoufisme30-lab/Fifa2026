@@ -37,6 +37,7 @@ interface PauseModalProps {
   onSelectFormation: (id: FormationId) => void;
   onSelectMentality: (m: TacticalMentality) => void;
   onResume: () => void;
+  onOpenSettings?: () => void;
   onRestart: () => void;
   onReturnToBracket?: () => void;
   onMainMenu: () => void;
@@ -50,6 +51,7 @@ export function PauseModal({
   onSelectFormation,
   onSelectMentality,
   onResume,
+  onOpenSettings,
   onRestart,
   onReturnToBracket,
   onMainMenu,
@@ -120,6 +122,16 @@ export function PauseModal({
           >
             {isOnline ? 'Reprendre' : 'Resume'}
           </button>
+          {onOpenSettings && (
+            <button
+              type="button"
+              data-testid="pause-settings-btn"
+              onClick={onOpenSettings}
+              className="w-full h-11 rounded-md bg-[#162740] hover:bg-[#1f3557] border border-amber-400/35 text-amber-300 font-display font-bold text-base tracking-wider uppercase cursor-pointer"
+            >
+              Settings
+            </button>
+          )}
           {!isOnline && (
             <button
               type="button"

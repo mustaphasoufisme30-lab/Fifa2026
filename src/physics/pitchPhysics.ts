@@ -384,7 +384,9 @@ export function resolveLooseBallBodyContact(
       ball.velocity.z = (ball.velocity.z - 1.45 * vn * nz) * 0.52 + p.velocity.z * 0.25;
       ball.velocity.y = Math.max(ball.velocity.y * 0.45, 0.85);
       ball.lastTouchTeam = p.team;
+      ball.lastTouchPlayerId = p.id;
       ball.lastTouchPlayerName = p.name;
+      ball.lastTouchSource = 'live';
       ball.pickupLockTimer = Math.max(ball.pickupLockTimer, 0.12);
       return p;
     }
@@ -459,7 +461,9 @@ export function attemptGoalkeeperSave(
     ball.velocity.y = 2.8;
     ball.pickupLockTimer = 0.22;
     ball.lastTouchTeam = gk.team;
+    ball.lastTouchPlayerId = gk.id;
     ball.lastTouchPlayerName = gk.name;
+    ball.lastTouchSource = 'live';
     gk.kickCooldown = 0.35;
     return 'parry';
   }
@@ -665,7 +669,9 @@ export function applyBallKick(
   ball.ownerId = null;
   ball.pickupLockTimer = 0.22;
   ball.lastTouchTeam = kicker.team;
+  ball.lastTouchPlayerId = kicker.id;
   ball.lastTouchPlayerName = kicker.name;
+  ball.lastTouchSource = 'live';
 
   ball.position.x = kicker.position.x + nx * (PLAYER_RADIUS + BALL_RADIUS + 0.15);
   ball.position.z = kicker.position.z + nz * (PLAYER_RADIUS + BALL_RADIUS + 0.15);

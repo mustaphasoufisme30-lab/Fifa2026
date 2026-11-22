@@ -23,14 +23,18 @@ import {
   TACKLE_REACH,
 } from '../core/constants';
 import {
+  BallRestartOrigin,
   BallState,
   CameraMode,
   FormationId,
+  FoulRecord,
+  FreeKickKind,
   GameShellState,
   InputSnapshot,
   MatchHudSnapshot,
   MatchPhase,
   MatchStats,
+  OffsideRecord,
   PlayerState,
   SetPieceInfo,
   SetPieceType,
@@ -46,14 +50,28 @@ import {
 } from '../multiplayer/protocol';
 import { ReplayRecorder } from './replayRecorder';
 import {
-  classifyTackleFoul,
+  capturePassOffsideSnapshot,
+  createMatchRulesState,
+  evaluateActiveChallenge,
+  evaluateBallBoundaryDecision,
+  evaluateHandballFoul,
+  evaluateIllegalPushFoul,
+  evaluateOffsideInterference,
+  evaluateOffsideOnTouch,
+  formatFoulTypeLabel,
+  MatchRulesRuntimeState,
+  OutOfBoundsDecision,
+  recordBallTouch,
+  resetTransientRuleState,
+  stepRuleTimers,
+} from './matchRulesEngine';
+import {
   computeLeadPassVector,
   computeMatchClock,
   computeSetPieceSetup,
   createTeamPlayers,
   evaluateInterception,
   findBestPassTarget,
-  getRestartPositionForOutOfBounds,
   isCleanTackleAngle,
   resetForKickoff,
   selectSwitchTarget,
@@ -118,6 +136,7 @@ export class MatchEngine {
   public goalBanner: MatchHudSnapshot['goalBanner'] = null;
   public setPiece: SetPieceInfo | null = null;
   public isReplaying = false;
+  public rulesState: MatchRulesRuntimeState = createMatchRulesState();
 
   private hitstopTimer = 0;
   private goalCelebrationTimer = 0;
@@ -248,7 +267,9 @@ export class MatchEngine {
       spin: { x: 0, y: 0, z: 0 },
       ownerId: null,
       lastTouchTeam: null,
+      lastTouchPlayerId: null,
       lastTouchPlayerName: null,
+      lastTouchSource: 'kickoff',
       pickupLockTimer: 0,
     };
   }
@@ -267,6 +288,12 @@ export class MatchEngine {
       awayCorners: 0,
       homeFouls: 0,
       awayFouls: 0,
+      homeOffsides: 0,
+      awayOffsides: 0,
+      homeYellowCards: 0,
+      awayYellowCards: 0,
+      homeRedCards: 0,
+      awayRedCards: 0,
       homePossessionSeconds: 0,
       awayPossessionSeconds: 0,
       lastScorerName: null,
@@ -276,20 +303,24 @@ export class MatchEngine {
   }
 
   private ensureControlledPlayers(): void {
-    const hasHomeControlled = this.players.some((p) => p.team === 'home' && p.isControlled);
+    const hasHomeControlled = this.players.some(
+      (p) => p.team === 'home' && p.isControlled && !p.isSentOff,
+    );
     if (!hasHomeControlled) {
       const homeStriker =
-        this.players.find((p) => p.team === 'home' && p.role === 'ST') ??
-        this.players.find((p) => p.team === 'home' && p.role !== 'GK');
+        this.players.find((p) => p.team === 'home' && p.role === 'ST' && !p.isSentOff) ??
+        this.players.find((p) => p.team === 'home' && p.role !== 'GK' && !p.isSentOff);
       if (homeStriker) homeStriker.isControlled = true;
     }
 
     if (this.awayHumanControl) {
-      const hasAwayControlled = this.players.some((p) => p.team === 'away' && p.isControlled);
+      const hasAwayControlled = this.players.some(
+        (p) => p.team === 'away' && p.isControlled && !p.isSentOff,
+      );
       if (!hasAwayControlled) {
         const awayStriker =
-          this.players.find((p) => p.team === 'away' && p.role === 'ST') ??
-          this.players.find((p) => p.team === 'away' && p.role !== 'GK');
+          this.players.find((p) => p.team === 'away' && p.role === 'ST' && !p.isSentOff) ??
+          this.players.find((p) => p.team === 'away' && p.role !== 'GK' && !p.isSentOff);
         if (awayStriker) awayStriker.isControlled = true;
       }
     } else {
@@ -376,6 +407,7 @@ export class MatchEngine {
     this.shotCharge = 0;
     this.awayShotCharge = 0;
     this.stats = this.createEmptyStats();
+    this.rulesState = createMatchRulesState();
     this.rebuildTeams();
     this.resetControlModeForKickoff();
     if (!this.isOnlineClient) {
@@ -403,6 +435,7 @@ export class MatchEngine {
       this.awayFormation,
       this.kickoffTeam,
     );
+    resetTransientRuleState(this.rulesState);
     this.ensureControlledPlayers();
     this.resetControlModeForKickoff();
     this.emitSound({ type: 'whistle', pattern: 'short' });
@@ -435,6 +468,8 @@ export class MatchEngine {
       hasBall: p.hasBall,
       isControlled: p.isControlled,
       animPhase: Math.round(p.animPhase * 100) / 100,
+      isSentOff: p.isSentOff,
+      yellowCards: p.yellowCards,
     }));
 
     return {
@@ -465,11 +500,22 @@ export class MatchEngine {
         },
         ownerId: this.ball.ownerId,
         lastTouchTeam: this.ball.lastTouchTeam,
+        lastTouchPlayerId: this.ball.lastTouchPlayerId ?? null,
         lastTouchPlayerName: this.ball.lastTouchPlayerName,
+        lastTouchSource: this.ball.lastTouchSource,
         pickupLockTimer: 0,
       },
       players: compactPlayers,
-      setPiece: this.setPiece ? { ...this.setPiece, spot: { ...this.setPiece.spot } } : null,
+      setPiece: this.setPiece
+        ? {
+            ...this.setPiece,
+            spot: { ...this.setPiece.spot },
+            foul: this.setPiece.foul ? { ...this.setPiece.foul, foulPosition: { ...this.setPiece.foul.foulPosition } } : null,
+            offside: this.setPiece.offside
+              ? { ...this.setPiece.offside, offsidePosition: { ...this.setPiece.offside.offsidePosition } }
+              : null,
+          }
+        : null,
       goalBanner: this.goalBanner ? { ...this.goalBanner } : null,
       stats: { ...this.stats },
       events,
@@ -507,7 +553,9 @@ export class MatchEngine {
 
     this.ball.ownerId = snapshot.ball.ownerId;
     this.ball.lastTouchTeam = snapshot.ball.lastTouchTeam;
+    this.ball.lastTouchPlayerId = snapshot.ball.lastTouchPlayerId ?? null;
     this.ball.lastTouchPlayerName = snapshot.ball.lastTouchPlayerName;
+    this.ball.lastTouchSource = snapshot.ball.lastTouchSource;
     this.ball.spin = { ...snapshot.ball.spin };
     this.ball.velocity = { ...snapshot.ball.velocity };
     this.netBallTarget = {
@@ -535,6 +583,8 @@ export class MatchEngine {
       p.diveDir = np.diveDir;
       p.hasBall = np.hasBall;
       p.isControlled = np.isControlled;
+      p.isSentOff = np.isSentOff ?? false;
+      p.yellowCards = np.yellowCards ?? 0;
       p.velocity.x = np.vx;
       p.velocity.z = np.vz;
       p.animPhase = np.animPhase;
@@ -744,6 +794,7 @@ export class MatchEngine {
           'away',
         );
         this.ensureControlledPlayers();
+        resetTransientRuleState(this.rulesState);
         this.resetControlModeForKickoff();
         this.emitSound({ type: 'whistle', pattern: 'short' });
         this.emitHudSnapshot();
@@ -754,6 +805,8 @@ export class MatchEngine {
     if (this.phase === 'fulltime') {
       return;
     }
+
+    stepRuleTimers(this.rulesState, dt);
 
     // Advance match clock
     this.halfElapsedReal += dt;
@@ -853,6 +906,13 @@ export class MatchEngine {
 
     for (let i = 0; i < this.players.length; i++) {
       const p = this.players[i];
+      if (p.isSentOff) {
+        p.velocity.x = 0;
+        p.velocity.z = 0;
+        p.hasBall = false;
+        p.isControlled = false;
+        continue;
+      }
       if (p.actionTimer > 0) {
         p.actionTimer = Math.max(0, p.actionTimer - dt);
         if (
@@ -941,6 +1001,34 @@ export class MatchEngine {
         this.ball.spin.x = -owner.velocity.z * 0.9;
         this.ball.spin.y = 0;
         this.ball.spin.z = owner.velocity.x * 0.9;
+
+        // Check boundary crossings even when a dribbler carries the ball across a line
+        const carrierBoundary = evaluateBallBoundaryDecision(this.ball);
+        if (carrierBoundary !== null) {
+          this.applyBoundaryDecision(carrierBoundary);
+          return;
+        }
+
+        // Event-driven spatial check for illegal forceful pushing from behind against carrier
+        for (let i = 0; i < this.players.length; i++) {
+          const opp = this.players[i];
+          if (opp.team === owner.team || opp.isSentOff || opp.actionState !== 'sprint') continue;
+          const dSq =
+            (opp.position.x - owner.position.x) * (opp.position.x - owner.position.x) +
+            (opp.position.z - owner.position.z) * (opp.position.z - owner.position.z);
+          if (dSq > 1.0) continue;
+          const pushFoul = evaluateIllegalPushFoul(
+            this.rulesState,
+            opp,
+            owner,
+            this.ball,
+            this.players,
+          );
+          if (pushFoul) {
+            this.handleFoulDetected(pushFoul, opp);
+            return;
+          }
+        }
       }
     } else {
       this.shotCharge = 0;
@@ -958,17 +1046,35 @@ export class MatchEngine {
         return;
       }
 
-      if (ballResult.outOfBounds !== null) {
-        this.handleOutOfBounds(ballResult.outOfBounds);
+      const boundary = evaluateBallBoundaryDecision(this.ball);
+      if (boundary !== null) {
+        this.applyBoundaryDecision(boundary);
+        return;
+      }
+
+      // Check active offside interference before ball pickup
+      const interferenceOffside = evaluateOffsideInterference(
+        this.rulesState,
+        this.ball,
+        this.players,
+      );
+      if (interferenceOffside) {
+        this.handleOffsideDetected(interferenceOffside);
         return;
       }
 
       this.tryPickupLooseBall();
+      if (this.phase !== 'live') return;
 
       // Prevent loose balls from ever ghosting through players when not picked up
       if (this.ball.ownerId === null) {
         const blocker = resolveLooseBallBodyContact(this.ball, this.players);
         if (blocker) {
+          const offsideOnDeflect = evaluateOffsideOnTouch(this.rulesState, blocker);
+          if (offsideOnDeflect) {
+            this.handleOffsideDetected(offsideOnDeflect);
+            return;
+          }
           this.emitSound({ type: 'kick', power: 0.48 });
         }
       }
@@ -1011,6 +1117,7 @@ export class MatchEngine {
 
     const taker = sp.takerId ? this.players.find((p) => p.id === sp.takerId) ?? null : null;
     if (!taker) {
+      resetTransientRuleState(this.rulesState);
       this.phase = 'live';
       this.setPiece = null;
       this.emitHudSnapshot();
@@ -1158,6 +1265,10 @@ export class MatchEngine {
           this.emitSound({ type: 'kick', power: 0.95 });
         }
 
+        const restartOrigin: BallRestartOrigin = sp.type;
+        this.ball.lastTouchSource = restartOrigin;
+        resetTransientRuleState(this.rulesState);
+        capturePassOffsideSnapshot(this.rulesState, taker, this.ball, this.players, restartOrigin);
         this.phase = 'live';
         this.setPiece = null;
         this.emitHudSnapshot();
@@ -1176,9 +1287,13 @@ export class MatchEngine {
           taker,
           decision.sideSpin,
         );
+        const restartOrigin: BallRestartOrigin = sp.type;
+        this.ball.lastTouchSource = restartOrigin;
         if (decision.isShot) this.stats.awayShots += 1;
         else this.stats.awayPasses += 1;
         this.emitSound({ type: 'kick', power: decision.isShot ? 1.15 : 0.9 });
+        resetTransientRuleState(this.rulesState);
+        capturePassOffsideSnapshot(this.rulesState, taker, this.ball, this.players, restartOrigin);
         this.phase = 'live';
         this.setPiece = null;
         this.emitHudSnapshot();
@@ -1280,6 +1395,7 @@ export class MatchEngine {
           p,
           shot.sideSpin,
         );
+        capturePassOffsideSnapshot(this.rulesState, p, this.ball, this.players, 'live');
         if (isHome) this.stats.homeShots += 1;
         else this.stats.awayShots += 1;
         this.hitstopTimer = shot.shotKind === 'power' ? 0.045 : 0.032;
@@ -1309,11 +1425,12 @@ export class MatchEngine {
         }
 
         applyBallKick(this.ball, dirX, dirZ, passSpeed, loft, p);
+        capturePassOffsideSnapshot(this.rulesState, p, this.ball, this.players, 'live');
         if (isHome) this.stats.homePasses += 1;
         else this.stats.awayPasses += 1;
         this.emitSound({ type: 'kick', power: isLob ? 1.0 : passSpeed > 18 ? 0.86 : 0.68 });
 
-        if (target && target.role !== 'GK') {
+        if (target && target.role !== 'GK' && !target.isSentOff) {
           p.isControlled = false;
           target.isControlled = true;
         }
@@ -1450,11 +1567,22 @@ export class MatchEngine {
       executeAiBallAction(p, this.ball, steering, this.players, (kind) => {
         this.emitSound({ type: 'kick', power: kind === 'kick' ? 1.12 : 0.72 });
       });
+      if (this.ball.ownerId === null) {
+        capturePassOffsideSnapshot(this.rulesState, p, this.ball, this.players, 'live');
+      }
     }
   }
 
   private attemptTackleSteal(tackler: PlayerState): void {
-    if (this.phase !== 'live' || tackler.actionState !== 'tackle') return;
+    if (this.phase !== 'live' || tackler.actionState !== 'tackle' || this.rulesState.eventLocked) {
+      return;
+    }
+
+    const challenge = evaluateActiveChallenge(this.rulesState, tackler, this.ball, this.players);
+    if (challenge.outcome === 'foul' && challenge.foul) {
+      this.handleFoulDetected(challenge.foul, tackler);
+      return;
+    }
 
     if (this.ball.ownerId === null) {
       const d = Math.hypot(
@@ -1462,6 +1590,11 @@ export class MatchEngine {
         this.ball.position.z - tackler.position.z,
       );
       if (d < TACKLE_REACH) {
+        const offside = evaluateOffsideOnTouch(this.rulesState, tackler);
+        if (offside) {
+          this.handleOffsideDetected(offside);
+          return;
+        }
         this.claimBall(tackler);
       }
       return;
@@ -1470,18 +1603,7 @@ export class MatchEngine {
     const owner = this.players.find((p) => p.id === this.ball.ownerId);
     if (!owner || owner.team === tackler.team) return;
 
-    const outcome = classifyTackleFoul(tackler, owner, this.ball);
-    if (outcome === 'free_kick' || outcome === 'penalty') {
-      if (tackler.team === 'home') this.stats.homeFouls += 1;
-      else this.stats.awayFouls += 1;
-      tackler.actionState = 'idle';
-      tackler.actionTimer = 0;
-      tackler.tackleCooldown = 1.6;
-      this.triggerSetPiece(outcome, owner.team, { ...owner.position });
-      return;
-    }
-
-    if (outcome === 'clean') {
+    if (challenge.outcome === 'clean') {
       owner.hasBall = false;
       owner.kickCooldown = 0.5;
       this.claimBall(tackler);
@@ -1489,23 +1611,119 @@ export class MatchEngine {
     }
   }
 
-  private triggerSetPiece(type: SetPieceType, restartTeam: TeamSide, spot: Vec3): void {
+  private handleFoulDetected(foul: FoulRecord, fouler?: PlayerState): void {
+    if (foul.foulingTeamId === 'home') {
+      this.stats.homeFouls += 1;
+      if (foul.card === 'yellow') this.stats.homeYellowCards = (this.stats.homeYellowCards ?? 0) + 1;
+      if (foul.card === 'red') this.stats.homeRedCards = (this.stats.homeRedCards ?? 0) + 1;
+    } else {
+      this.stats.awayFouls += 1;
+      if (foul.card === 'yellow') this.stats.awayYellowCards = (this.stats.awayYellowCards ?? 0) + 1;
+      if (foul.card === 'red') this.stats.awayRedCards = (this.stats.awayRedCards ?? 0) + 1;
+    }
+
+    if (fouler) {
+      fouler.actionState = 'idle';
+      fouler.actionTimer = 0;
+      fouler.tackleCooldown = 1.6;
+    }
+
+    this.ensureControlledPlayers();
+    this.triggerSetPiece(foul.restartType, foul.fouledTeamId, { ...foul.foulPosition }, {
+      kickKind: foul.kickKind,
+      reason: 'foul',
+      foul,
+    });
+  }
+
+  private handleOffsideDetected(offside: OffsideRecord): void {
+    if (offside.offsideTeam === 'home') {
+      this.stats.homeOffsides = (this.stats.homeOffsides ?? 0) + 1;
+    } else {
+      this.stats.awayOffsides = (this.stats.awayOffsides ?? 0) + 1;
+    }
+
+    const restartTeam: TeamSide = offside.offsideTeam === 'home' ? 'away' : 'home';
+    this.triggerSetPiece('indirect_free_kick', restartTeam, { ...offside.offsidePosition }, {
+      kickKind: 'indirect',
+      reason: 'offside',
+      offside,
+    });
+  }
+
+  private applyBoundaryDecision(decision: OutOfBoundsDecision): void {
+    if (this.rulesState.eventLocked) return;
+
+    if (decision.event === 'GOAL' && decision.restartType === 'goal') {
+      this.rulesState.ruleState = 'GOAL';
+      this.rulesState.eventLocked = true;
+      this.rulesState.offsideSnapshot = null;
+      this.replayRecorder.record(this.ball, this.players, 0.04);
+      this.handleGoalScored(decision.awardedTeam);
+      return;
+    }
+
+    if (decision.restartType === 'corner') {
+      if (decision.awardedTeam === 'home') this.stats.homeCorners += 1;
+      else this.stats.awayCorners += 1;
+    }
+
+    this.rulesState.offsideSnapshot = null;
+    this.rulesState.eventLocked = true;
+    this.triggerSetPiece(decision.restartType as SetPieceType, decision.awardedTeam, decision.spot, {
+      reason: 'out_of_bounds',
+    });
+  }
+
+  private triggerSetPiece(
+    type: SetPieceType,
+    restartTeam: TeamSide,
+    spot: Vec3,
+    meta?: {
+      kickKind?: FreeKickKind;
+      reason?: 'out_of_bounds' | 'foul' | 'offside';
+      foul?: FoulRecord | null;
+      offside?: OffsideRecord | null;
+    },
+  ): void {
     const setup = computeSetPieceSetup(type, spot, restartTeam, this.players, this.ball);
     this.shotCharge = 0;
     this.awayShotCharge = 0;
     this.phase = 'setpiece';
+    this.rulesState.eventLocked = true;
+    this.rulesState.offsideSnapshot = null;
+    this.rulesState.ruleState =
+      type === 'throw_in'
+        ? 'THROW_IN'
+        : type === 'goal_kick'
+          ? 'GOAL_KICK'
+          : type === 'corner'
+            ? 'CORNER_KICK'
+            : type === 'penalty'
+              ? 'PENALTY'
+              : type === 'indirect_free_kick'
+                ? 'INDIRECT_FREE_KICK'
+                : 'FREE_KICK';
+
     this.setPiece = {
       type,
       team: restartTeam,
       spot: setup.spot,
       takerId: setup.takerId,
       timer: type === 'penalty' ? 1.45 : 1.15,
+      kickKind: meta?.kickKind ?? (type === 'indirect_free_kick' ? 'indirect' : 'direct'),
+      reason: meta?.reason ?? 'out_of_bounds',
+      foul: meta?.foul ?? null,
+      offside: meta?.offside ?? null,
     };
     this.emitSound({
       type: 'whistle',
-      pattern: type === 'penalty' || type === 'free_kick' ? 'double' : 'short',
+      pattern:
+        type === 'penalty' || type === 'free_kick' || type === 'indirect_free_kick'
+          ? 'double'
+          : 'short',
     });
-    if (type === 'penalty' || type === 'free_kick') {
+    if (type === 'penalty' || type === 'free_kick' || type === 'indirect_free_kick') {
       this.emitSound({ type: 'crowd', reaction: 'boo' });
     } else if (type === 'corner') {
       this.emitSound({ type: 'crowd', reaction: 'applause' });
@@ -1538,6 +1756,7 @@ export class MatchEngine {
           else this.stats.awaySaves += 1;
           this.emitSound({ type: 'crowd', reaction: 'applause' });
         }
+        this.rulesState.offsideSnapshot = null;
         p.gkHoldTimer = 0.75;
         this.claimBall(p);
         this.emitSound({ type: 'kick', power: 0.55 });
@@ -1557,7 +1776,7 @@ export class MatchEngine {
 
     for (let i = 0; i < this.players.length; i++) {
       const p = this.players[i];
-      if (p.role === 'GK' || p.kickCooldown > 0) continue;
+      if (p.role === 'GK' || p.kickCooldown > 0 || p.isSentOff) continue;
 
       const d = Math.hypot(
         this.ball.position.x - p.position.x,
@@ -1586,6 +1805,26 @@ export class MatchEngine {
 
     // Physical block of a fast/high opponent strike
     if (!closestReceiver && !closestInterceptor && closestBlocker) {
+      // Event-driven handball check ONLY on rare airborne arm-height strike blocks during diving/lunging block
+      const isOutstretchedArmBlock =
+        closestBlocker.actionState === 'tackle' &&
+        this.ball.position.y >= 1.24 &&
+        this.ball.position.y <= 1.5;
+      const handball = evaluateHandballFoul(
+        this.rulesState,
+        closestBlocker,
+        this.ball,
+        this.players,
+        isOutstretchedArmBlock,
+      );
+      if (handball) {
+        this.handleFoulDetected(handball, closestBlocker);
+        return;
+      }
+
+      // Opponent defender blocking clears any active offside pass snapshot
+      evaluateOffsideOnTouch(this.rulesState, closestBlocker);
+
       const bx = this.ball.position.x - closestBlocker.position.x;
       const bz = this.ball.position.z - closestBlocker.position.z;
       const len = Math.hypot(bx, bz) || 1;
@@ -1593,8 +1832,7 @@ export class MatchEngine {
       this.ball.velocity.z = (bz / len) * 6.2 + closestBlocker.velocity.z * 0.3;
       this.ball.velocity.y = 2.1;
       this.ball.pickupLockTimer = 0.16;
-      this.ball.lastTouchTeam = closestBlocker.team;
-      this.ball.lastTouchPlayerName = closestBlocker.name;
+      recordBallTouch(this.ball, closestBlocker, 'live');
       closestBlocker.kickCooldown = 0.2;
       this.emitSound({ type: 'kick', power: 0.72 });
       return;
@@ -1608,6 +1846,13 @@ export class MatchEngine {
         : closestReceiver ?? closestInterceptor;
 
     if (!winner) return;
+
+    // Check active offside BEFORE allowing the player to receive/continue the attack!
+    const offsideRecord = evaluateOffsideOnTouch(this.rulesState, winner);
+    if (offsideRecord) {
+      this.handleOffsideDetected(offsideRecord);
+      return;
+    }
 
     const inputDir =
       winner.isControlled && winner.team === 'home'
@@ -1626,8 +1871,7 @@ export class MatchEngine {
       this.ball.velocity.z = reception.touchDirZ * reception.deflectSpeed;
       this.ball.velocity.y = 1.4;
       this.ball.pickupLockTimer = 0.14;
-      this.ball.lastTouchTeam = winner.team;
-      this.ball.lastTouchPlayerName = winner.name;
+      recordBallTouch(this.ball, winner, 'live');
       this.emitSound({ type: 'kick', power: 0.55 });
       return;
     }
@@ -1655,8 +1899,7 @@ export class MatchEngine {
       p.hasBall = p.id === player.id;
     }
     this.ball.ownerId = player.id;
-    this.ball.lastTouchTeam = player.team;
-    this.ball.lastTouchPlayerName = player.name;
+    recordBallTouch(this.ball, player, 'live');
 
     if (player.team === 'home' && player.role !== 'GK' && !player.isControlled) {
       this.shotCharge = 0;
@@ -1738,35 +1981,17 @@ export class MatchEngine {
     this.emitHudSnapshot();
   }
 
-  private handleOutOfBounds(outType: 'sideline' | 'endline_home' | 'endline_away'): void {
-    const restart = getRestartPositionForOutOfBounds(
-      outType,
-      this.ball.position.x,
-      this.ball.position.z,
-      this.ball.lastTouchTeam,
-    );
-
-    if (restart.type === 'corner') {
-      if (restart.restartTeam === 'home') this.stats.homeCorners += 1;
-      else this.stats.awayCorners += 1;
-    }
-
-    this.triggerSetPiece(restart.type, restart.restartTeam, {
-      x: restart.x,
-      y: BALL_RADIUS,
-      z: restart.z,
-    });
-  }
-
   public emitHudSnapshot(): void {
     const controlled = this.getControlledPlayer(this.localSide) ?? this.players[9];
     const localCharge = this.getShotCharge(this.localSide);
-    const radarPlayers = this.players.map((p) => ({
-      x: p.position.x / HALF_LENGTH,
-      z: p.position.z / 34,
-      team: p.team,
-      isControlled: p.team === this.localSide && p.isControlled,
-    }));
+    const radarPlayers = this.players
+      .filter((p) => !p.isSentOff)
+      .map((p) => ({
+        x: p.position.x / HALF_LENGTH,
+        z: p.position.z / 34,
+        team: p.team,
+        isControlled: p.team === this.localSide && p.isControlled,
+      }));
 
     let setPieceBanner: MatchHudSnapshot['setPieceBanner'] = null;
     if (this.phase === 'setpiece' && this.setPiece) {
@@ -1777,15 +2002,31 @@ export class MatchEngine {
         hint =
           sp.type === 'penalty'
             ? 'Visez un angle + Maintenez/Relâchez TIR'
-            : 'Visez + PASSE / LOB / TIR';
+            : sp.type === 'indirect_free_kick'
+              ? 'Coup franc indirect · Visez + PASSE'
+              : 'Visez + PASSE / LOB / TIR';
       } else if (sp.type === 'penalty') {
         hint = 'Déplacez le gardien + TACLE / TIR pour plonger';
       }
+
+      let detail: string | undefined;
+      if (sp.reason === 'offside' && sp.offside) {
+        detail = `Hors-jeu : ${sp.offside.offsidePlayerName}`;
+      } else if (sp.reason === 'foul' && sp.foul) {
+        const foulTeamShort =
+          sp.foul.foulingTeamId === 'home' ? this.homeTeam.shortName : this.awayTeam.shortName;
+        detail = `Faute : ${sp.foul.foulingPlayerName} (${foulTeamShort}) · ${formatFoulTypeLabel(sp.foul.foulType)}`;
+      }
+
       setPieceBanner = {
         type: sp.type,
         team: sp.team,
         teamName,
         hint,
+        detail,
+        card: sp.foul?.card,
+        kickKind: sp.kickKind,
+        reason: sp.reason,
       };
     }
 

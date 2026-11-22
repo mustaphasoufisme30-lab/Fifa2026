@@ -65,6 +65,8 @@ export interface CompactPlayerNetState {
   hasBall: boolean;
   isControlled: boolean;
   animPhase: number;
+  isSentOff?: boolean;
+  yellowCards?: number;
 }
 
 export interface OnlineMatchSnapshot {

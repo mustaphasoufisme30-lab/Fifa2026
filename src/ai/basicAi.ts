@@ -51,7 +51,7 @@ export function computeDefensiveAssignments(
 
   for (let i = 0; i < players.length; i++) {
     const p = players[i];
-    if (p.team !== team || p.role === 'GK' || p.isControlled) continue;
+    if (p.team !== team || p.role === 'GK' || p.isControlled || p.isSentOff) continue;
     const d = Math.hypot(p.position.x - ball.position.x, p.position.z - ball.position.z);
     if (d < best1) {
       best2 = best1;
@@ -382,14 +382,32 @@ export function computeAiSteering(
     if (isAttacker) {
       const counterPush = transitionMode === 'attack' ? 5.5 : 0;
       const pushDist = 13.5 + tactics.attackPushMeters + counterPush;
+
+      // Offside-line awareness: keep off-ball AI runs hovering smartly near the 2nd-last defender
+      const oppXs: number[] = [];
+      for (let i = 0; i < allPlayers.length; i++) {
+        const opp = allPlayers[i];
+        if (opp.team !== player.team && !opp.isSentOff) oppXs.push(opp.position.x);
+      }
+      let offsideCapX = attackDir > 0 ? HALF_LENGTH - 5.5 : -HALF_LENGTH + 5.5;
+      if (attackDir > 0) {
+        oppXs.sort((a, b) => b - a);
+        const secondLast = oppXs.length >= 2 ? oppXs[1] : HALF_LENGTH - 5.5;
+        offsideCapX = Math.max(0, ball.position.x, secondLast) - 0.65;
+      } else {
+        oppXs.sort((a, b) => a - b);
+        const secondLast = oppXs.length >= 2 ? oppXs[1] : -HALF_LENGTH + 5.5;
+        offsideCapX = Math.min(0, ball.position.x, secondLast) + 0.65;
+      }
+
       let runDepth = Math.min(
         HALF_LENGTH - 5.5,
-        Math.max(anchor.x, ball.position.x + attackDir * pushDist),
+        Math.min(offsideCapX, Math.max(anchor.x, ball.position.x + attackDir * pushDist)),
       );
       if (attackDir < 0) {
         runDepth = Math.max(
           -HALF_LENGTH + 5.5,
-          Math.min(anchor.x, ball.position.x + attackDir * pushDist),
+          Math.max(offsideCapX, Math.min(anchor.x, ball.position.x + attackDir * pushDist)),
         );
       }
 
@@ -714,9 +732,10 @@ export function computeSetPieceAiDecision(
     };
   }
 
-  if (type === 'free_kick') {
+  if (type === 'free_kick' || type === 'indirect_free_kick') {
     const distToGoal = Math.hypot(oppGoalX - ball.position.x, ball.position.z);
-    if (distToGoal < 30) {
+    // Law 13: Only a DIRECT free kick may be shot directly on goal; indirect must be passed
+    if (type === 'free_kick' && distToGoal < 30) {
       const cornerSign = ball.position.z >= 0 ? -1 : 1;
       const targetZ = cornerSign * (GOAL_HALF_WIDTH * 0.65);
       return {
@@ -730,7 +749,7 @@ export function computeSetPieceAiDecision(
     }
     const target = findBestPassTarget(taker, allPlayers, attackDir, 0);
     if (target) {
-      const lead = computeLeadPassVector(taker, target, true);
+      const lead = computeLeadPassVector(taker, target, type === 'free_kick');
       return {
         dirX: lead.dirX,
         dirZ: lead.dirZ,
@@ -740,6 +759,14 @@ export function computeSetPieceAiDecision(
         isShot: false,
       };
     }
+    return {
+      dirX: attackDir,
+      dirZ: ball.position.z > 0 ? -0.35 : 0.35,
+      speed: 15.5,
+      loft: 1.2,
+      sideSpin: 0,
+      isShot: false,
+    };
   }
 
   if (type === 'corner') {

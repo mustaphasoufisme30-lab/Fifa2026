@@ -36,6 +36,7 @@ const SET_PIECE_LABELS: Record<SetPieceType, string> = {
   goal_kick: 'GOAL KICK',
   corner: 'CORNER KICK',
   free_kick: 'FREE KICK',
+  indirect_free_kick: 'INDIRECT FREE KICK',
   penalty: 'PENALTY KICK',
 };
 
@@ -263,9 +264,31 @@ export function MatchHud({
           data-testid="set-piece-banner"
           className="fixed top-20 sm:top-18 left-1/2 -translate-x-1/2 px-5 py-2 rounded-md bg-[#09121e]/92 border border-sky-400/60 shadow-xl text-center whitespace-nowrap"
         >
-          <div className="font-display font-extrabold text-lg sm:text-2xl tracking-wider text-sky-300 uppercase">
-            {SET_PIECE_LABELS[snapshot.setPieceBanner.type]} · {snapshot.setPieceBanner.teamName}
+          <div className="flex items-center justify-center gap-2 font-display font-extrabold text-lg sm:text-2xl tracking-wider text-sky-300 uppercase">
+            {snapshot.setPieceBanner.card === 'yellow' && (
+              <span
+                aria-label="Yellow card"
+                className="inline-block w-3 h-4 rounded-[2px] bg-amber-400 border border-amber-200 shadow-sm shrink-0"
+              />
+            )}
+            {snapshot.setPieceBanner.card === 'red' && (
+              <span
+                aria-label="Red card"
+                className="inline-block w-3 h-4 rounded-[2px] bg-rose-600 border border-rose-300 shadow-sm shrink-0"
+              />
+            )}
+            <span>
+              {snapshot.setPieceBanner.reason === 'offside'
+                ? `OFFSIDE · ${SET_PIECE_LABELS[snapshot.setPieceBanner.type]}`
+                : SET_PIECE_LABELS[snapshot.setPieceBanner.type]}{' '}
+              · {snapshot.setPieceBanner.teamName}
+            </span>
           </div>
+          {snapshot.setPieceBanner.detail && (
+            <div className="text-[11px] sm:text-xs font-semibold text-amber-200 mt-0.5">
+              {snapshot.setPieceBanner.detail}
+            </div>
+          )}
           <div className="text-[11px] sm:text-xs font-medium text-slate-200">
             {snapshot.setPieceBanner.hint}
           </div>

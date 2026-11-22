@@ -168,7 +168,7 @@ export function selectSwitchTarget(
   let bestScore = Infinity;
 
   for (const p of players) {
-    if (p.team !== team || p.role === 'GK' || p.id === currentControlledId) continue;
+    if (p.team !== team || p.role === 'GK' || p.id === currentControlledId || p.isSentOff) continue;
     const dx = p.position.x - ball.position.x;
     const dz = p.position.z - ball.position.z;
     const dist = Math.hypot(dx, dz);
@@ -323,7 +323,7 @@ export function findBestPassTarget(
   const maxDist = isLob ? 54 : 46;
 
   for (const p of players) {
-    if (p.team !== passer.team || p.id === passer.id) continue;
+    if (p.team !== passer.team || p.id === passer.id || p.isSentOff) continue;
     const dx = p.position.x - passer.position.x;
     const dz = p.position.z - passer.position.z;
     const dist = Math.hypot(dx, dz);
@@ -625,24 +625,26 @@ export function computeSetPieceSetup(
     p.diveDir = 0;
   }
 
-  // Pick appropriate taker
+  // Pick appropriate taker (excluding any sent-off players)
   let taker: PlayerState | null = null;
   if (type === 'goal_kick') {
-    taker = players.find((p) => p.team === restartTeam && p.role === 'GK') ?? null;
+    taker = players.find((p) => p.team === restartTeam && p.role === 'GK' && !p.isSentOff) ?? null;
   } else if (type === 'penalty') {
     taker =
-      players.find((p) => p.team === restartTeam && p.slotIndex === 9) ??
-      players.find((p) => p.team === restartTeam && p.role !== 'GK') ??
+      players.find((p) => p.team === restartTeam && p.slotIndex === 9 && !p.isSentOff) ??
+      players.find((p) => p.team === restartTeam && p.role !== 'GK' && !p.isSentOff) ??
       null;
   } else if (type === 'corner') {
     taker =
-      players.find((p) => p.team === restartTeam && (p.role === 'LW' || p.role === 'RW')) ??
-      players.find((p) => p.team === restartTeam && p.role !== 'GK') ??
+      players.find(
+        (p) => p.team === restartTeam && (p.role === 'LW' || p.role === 'RW') && !p.isSentOff,
+      ) ??
+      players.find((p) => p.team === restartTeam && p.role !== 'GK' && !p.isSentOff) ??
       null;
   } else {
     let bestDist = Infinity;
     for (const p of players) {
-      if (p.team !== restartTeam || p.role === 'GK') continue;
+      if (p.team !== restartTeam || p.role === 'GK' || p.isSentOff) continue;
       const d = Math.hypot(p.position.x - spot.x, p.position.z - spot.z);
       if (d < bestDist) {
         bestDist = d;
@@ -675,7 +677,9 @@ export function computeSetPieceSetup(
       taker.position.z = spot.z - (toGoalZ / len) * 0.9;
       taker.facingAngle = Math.atan2(toGoalX, toGoalZ);
     }
+    ball.lastTouchPlayerId = taker.id;
     ball.lastTouchPlayerName = taker.name;
+    ball.lastTouchSource = type;
   }
 
   // Position remaining 21 players tactically by set-piece type
@@ -736,7 +740,7 @@ export function computeSetPieceSetup(
         defCount++;
       }
     }
-  } else if (type === 'free_kick') {
+  } else if (type === 'free_kick' || type === 'indirect_free_kick') {
     const distToGoal = Math.hypot(oppGoalX - spot.x, 0 - spot.z);
     const dirX = (oppGoalX - spot.x) / (distToGoal || 1);
     const dirZ = (0 - spot.z) / (distToGoal || 1);
@@ -745,19 +749,19 @@ export function computeSetPieceSetup(
 
     // Select up to 3 defending outfielders closest to spot for the 9.15m wall
     const defenders = players
-      .filter((p) => p.team !== restartTeam && p.role !== 'GK')
+      .filter((p) => p.team !== restartTeam && p.role !== 'GK' && !p.isSentOff)
       .sort(
         (a, b) =>
           Math.hypot(a.position.x - spot.x, a.position.z - spot.z) -
           Math.hypot(b.position.x - spot.x, b.position.z - spot.z),
       );
 
-    const wallCount = distToGoal < 35 ? 3 : 1;
+    const wallCount = type === 'free_kick' && distToGoal < 35 ? 3 : 1;
     const wallIds = new Set(defenders.slice(0, wallCount).map((d) => d.id));
     let wallIndex = 0;
 
     for (const p of players) {
-      if (taker && p.id === taker.id) continue;
+      if (p.isSentOff || (taker && p.id === taker.id)) continue;
       if (wallIds.has(p.id)) {
         const lateral = (wallIndex - (wallCount - 1) / 2) * 0.95;
         p.position.x = spot.x + dirX * CENTER_CIRCLE_RADIUS + perpX * lateral;
@@ -778,7 +782,7 @@ export function computeSetPieceSetup(
     // Throw-in or Goal kick: clear nearby opponents outside minimum legal buffer
     const minBuffer = type === 'goal_kick' ? 13 : 3.5;
     for (const p of players) {
-      if (taker && p.id === taker.id) continue;
+      if (p.isSentOff || (taker && p.id === taker.id)) continue;
       if (p.team !== restartTeam && p.role !== 'GK') {
         const d = Math.hypot(p.position.x - spot.x, p.position.z - spot.z);
         if (d < minBuffer) {
@@ -788,6 +792,37 @@ export function computeSetPieceSetup(
           p.position.z = Math.max(-HALF_WIDTH + 2, Math.min(HALF_WIDTH - 2, spot.z + nz * minBuffer));
         }
       }
+    }
+
+    // On a throw-in, bring two nearest attacking outfield teammates into realistic receiving pockets
+    if (type === 'throw_in') {
+      const zSign = spot.z >= 0 ? 1 : -1;
+      const mates = players
+        .filter((p) => p.team === restartTeam && p.role !== 'GK' && !p.isSentOff && p.id !== taker?.id)
+        .sort(
+          (a, b) =>
+            Math.hypot(a.position.x - spot.x, a.position.z - spot.z) -
+            Math.hypot(b.position.x - spot.x, b.position.z - spot.z),
+        );
+      if (mates[0]) {
+        mates[0].position.x = Math.max(-HALF_LENGTH + 3, Math.min(HALF_LENGTH - 3, spot.x + attackDir * 5.2));
+        mates[0].position.z = spot.z - zSign * 5.8;
+        mates[0].facingAngle = Math.atan2(spot.x - mates[0].position.x, spot.z - mates[0].position.z);
+      }
+      if (mates[1]) {
+        mates[1].position.x = Math.max(-HALF_LENGTH + 3, Math.min(HALF_LENGTH - 3, spot.x - attackDir * 4.5));
+        mates[1].position.z = spot.z - zSign * 7.8;
+        mates[1].facingAngle = Math.atan2(spot.x - mates[1].position.x, spot.z - mates[1].position.z);
+      }
+    }
+  }
+
+  // Keep any sent-off players parked cleanly off the touchline
+  for (const p of players) {
+    if (p.isSentOff) {
+      p.position.x = 0;
+      p.position.z = p.team === 'home' ? -HALF_WIDTH - 2.6 : HALF_WIDTH + 2.6;
+      p.isControlled = false;
     }
   }
 

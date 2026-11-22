@@ -35,7 +35,56 @@ export type SetPieceType =
   | 'goal_kick'
   | 'corner'
   | 'free_kick'
+  | 'indirect_free_kick'
   | 'penalty';
+
+export type BallRestartOrigin =
+  | 'live'
+  | 'kickoff'
+  | 'throw_in'
+  | 'goal_kick'
+  | 'corner'
+  | 'free_kick'
+  | 'indirect_free_kick'
+  | 'penalty';
+
+export type FoulType =
+  | 'tripping'
+  | 'pushing'
+  | 'late_tackle'
+  | 'tackle_from_behind'
+  | 'obstruction'
+  | 'dangerous_tackle'
+  | 'handball';
+
+export type CardType = 'none' | 'yellow' | 'red';
+
+export type FreeKickKind = 'direct' | 'indirect';
+
+export interface FoulRecord {
+  foulingPlayerId: string;
+  foulingPlayerName: string;
+  foulingTeamId: TeamSide;
+  fouledPlayerId: string;
+  fouledPlayerName: string;
+  fouledTeamId: TeamSide;
+  foulType: FoulType;
+  foulPosition: Vec3;
+  timestamp: number;
+  restartType: 'free_kick' | 'indirect_free_kick' | 'penalty';
+  kickKind: FreeKickKind;
+  card: CardType;
+  isSecondYellow?: boolean;
+}
+
+export interface OffsideRecord {
+  offsidePlayerId: string;
+  offsidePlayerName: string;
+  offsideTeam: TeamSide;
+  offsidePosition: Vec3;
+  offsideLineX: number;
+  passTimestamp: number;
+}
 
 export type PlayerActionState =
   | 'idle'
@@ -129,6 +178,8 @@ export interface PlayerState {
   hasBall: boolean;
   isControlled: boolean;
   animPhase: number;
+  isSentOff?: boolean;
+  yellowCards?: number;
 }
 
 export interface BallState {
@@ -137,7 +188,9 @@ export interface BallState {
   spin: Vec3;
   ownerId: string | null;
   lastTouchTeam: TeamSide | null;
+  lastTouchPlayerId?: string | null;
   lastTouchPlayerName: string | null;
+  lastTouchSource?: BallRestartOrigin;
   pickupLockTimer: number;
 }
 
@@ -147,6 +200,10 @@ export interface SetPieceInfo {
   spot: Vec3;
   takerId: string | null;
   timer: number;
+  kickKind?: FreeKickKind;
+  reason?: 'out_of_bounds' | 'foul' | 'offside';
+  foul?: FoulRecord | null;
+  offside?: OffsideRecord | null;
   aimAngle?: number;
   curve?: number;
   distanceMeters?: number;
@@ -218,6 +275,12 @@ export interface MatchStats {
   awayCorners: number;
   homeFouls: number;
   awayFouls: number;
+  homeOffsides?: number;
+  awayOffsides?: number;
+  homeYellowCards?: number;
+  awayYellowCards?: number;
+  homeRedCards?: number;
+  awayRedCards?: number;
   homePossessionSeconds: number;
   awayPossessionSeconds: number;
   lastScorerName: string | null;
@@ -315,6 +378,10 @@ export interface MatchHudSnapshot {
     team: TeamSide;
     teamName: string;
     hint: string;
+    detail?: string;
+    card?: CardType;
+    kickKind?: FreeKickKind;
+    reason?: 'out_of_bounds' | 'foul' | 'offside';
     distanceMeters?: number;
     aimNormalized?: number;
   } | null;

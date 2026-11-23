@@ -26,7 +26,7 @@ jobs:
           npx cap add android
           npx cap copy android
           
-          npm install -D @capacitor/assets
+          
           npx @capacitor/assets generate --android
 
           cd android

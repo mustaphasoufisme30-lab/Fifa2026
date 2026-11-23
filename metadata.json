@@ -4,3 +4,10 @@
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
+"icons": [
+  {
+    "src": "/icon-512.png",
+    "sizes": "512x512",
+    "type": "image/png"
+  }
+]
